@@ -46,14 +46,25 @@ struct SpatialInjuryMarker: Identifiable {
     let id: UUID
     var worldPosition: SIMD3<Float>
     var injuryType: InjuryType
-    // Strong reference to the RealityKit pin entity so we can update its material.
+    var note: String
     let pinEntity: ModelEntity
 
-    init(worldPosition: SIMD3<Float>, injuryType: InjuryType = .bruise, pinEntity: ModelEntity) {
+    init(worldPosition: SIMD3<Float>, injuryType: InjuryType = .bruise, note: String = "", pinEntity: ModelEntity) {
         self.id = UUID()
         self.worldPosition = worldPosition
         self.injuryType = injuryType
+        self.note = note
         self.pinEntity = pinEntity
+    }
+
+    var bodyRegionName: String {
+        let y = worldPosition.y
+        if y > 1.10 { return "Head" }
+        if y > 0.85 { return "Neck / Shoulders" }
+        if y > 0.50 { return "Torso" }
+        if y > 0.20 { return "Hips / Pelvis" }
+        if y > -0.10 { return "Upper Legs" }
+        return "Lower Legs / Feet"
     }
 }
 
@@ -87,7 +98,7 @@ final class SpatialIncidentViewModel {
     // MARK: Body model state
     var isBodyModelReady = false
     // Root entity of the procedural body — used by the update closure to parent pins.
-    private(set) var bodyRootEntity = Entity()
+    var bodyRootEntity = Entity()
     // When non-nil the update closure creates a new pin and clears this.
     var pendingTapWorldPosition: SIMD3<Float>? = nil
 
@@ -201,6 +212,12 @@ final class SpatialIncidentViewModel {
         selectedMarkerID = marker.id
     }
 
+    /// Updates the free-text note attached to a marker.
+    func updateMarkerNote(_ markerID: UUID, note: String) {
+        guard let idx = injuryMarkers.firstIndex(where: { $0.id == markerID }) else { return }
+        injuryMarkers[idx].note = note
+    }
+
     /// Updates the emissive colour of a pin when the user changes its injury type.
     func updateMarkerType(_ markerID: UUID, to type: InjuryType) {
         guard let idx = injuryMarkers.firstIndex(where: { $0.id == markerID }) else { return }
@@ -234,11 +251,13 @@ final class SpatialIncidentViewModel {
 
         // Encode spatial pin positions as normalised BodyMapMarkers for iPad compatibility
         incident.bodyMapMarkers = injuryMarkers.map { m in
-            BodyMapMarker(
+            let noteText = m.note.trimmingCharacters(in: .whitespaces)
+            let label = noteText.isEmpty ? m.injuryType.rawValue : "\(m.injuryType.rawValue): \(noteText)"
+            return BodyMapMarker(
                 x:       Double((m.worldPosition.x + 0.4) / 0.8).clamped(to: 0...1),
                 y:       Double(1.0 - (m.worldPosition.y + 0.2) / 1.2).clamped(to: 0...1),
                 isFront: true,
-                label:   m.injuryType.rawValue
+                label:   label
             )
         }
 
@@ -338,6 +357,16 @@ final class SpatialIncidentViewModel {
         entity.components.set(CollisionComponent(shapes: [.generateSphere(radius: 0.022)]))
         entity.components.set(HoverEffectComponent())
         applyPinMaterial(to: entity, type: type)
+
+        // Outer glow sphere
+        let glowMesh = MeshResource.generateSphere(radius: 0.038)
+        var glowMat = UnlitMaterial()
+        let gc = type.pinColor
+        glowMat.color = .init(tint: gc.withAlphaComponent(0.22))
+        let glowSphere = ModelEntity(mesh: glowMesh, materials: [glowMat])
+        glowSphere.name = "injuryPinGlow"
+        entity.addChild(glowSphere)
+
         return entity
     }
 
@@ -352,6 +381,13 @@ final class SpatialIncidentViewModel {
         mat.roughness       = 0.2
         mat.metallic        = 0.0
         entity.model?.materials = [mat]
+
+        // Recolour the glow child if present
+        if let glowChild = entity.findEntity(named: "injuryPinGlow") as? ModelEntity {
+            var glowMat = UnlitMaterial()
+            glowMat.color = .init(tint: type.pinColor.withAlphaComponent(0.22))
+            glowChild.model?.materials = [glowMat]
+        }
     }
 }
 

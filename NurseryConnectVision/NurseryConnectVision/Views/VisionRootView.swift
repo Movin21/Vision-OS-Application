@@ -14,10 +14,10 @@ struct VisionRootView: View {
     private var children: [Child]
 
     @Environment(\.modelContext) private var context
+    @Environment(SpatialIncidentViewModel.self) private var viewModel
 
     @State private var selectedChildID: UUID? = nil
     @State private var searchText = ""
-    @State private var viewModel = SpatialIncidentViewModel()
 
     private var selectedChild: Child? {
         guard let id = selectedChildID else { return nil }
