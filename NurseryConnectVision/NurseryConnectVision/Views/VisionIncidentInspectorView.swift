@@ -27,6 +27,7 @@ struct VisionIncidentInspectorView: View {
     @Environment(\.modelContext) private var context
     @Environment(\.openImmersiveSpace)    private var openImmersiveSpace
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
+    @Environment(\.openWindow)            private var openWindow
 
     @State private var selectedIncident: Incident? = nil
     @State private var appeared = false
@@ -57,9 +58,8 @@ struct VisionIncidentInspectorView: View {
         .ornament(attachmentAnchor: .scene(.bottom), contentAlignment: .top) {
             bottomOrnament
         }
-        .sheet(isPresented: $viewModel.showIncidentForm) {
-            IncidentFormSheet(child: child, viewModel: viewModel, context: context)
-        }
+        // Incident form is presented via openWindow(id: "incident-form") so
+        // it always floats in front of the 3D body instead of being occluded.
         .overlay(alignment: .top) {
             if viewModel.showSaveConfirmation {
                 SaveConfirmationBanner()
@@ -111,7 +111,7 @@ struct VisionIncidentInspectorView: View {
 
         ToolbarItem(placement: .topBarTrailing) {
             Button {
-                viewModel.showIncidentForm = true
+                openWindow(id: "incident-form")
             } label: {
                 Label("Log Incident", systemImage: "plus.circle.fill")
                     .labelStyle(.titleAndIcon)
@@ -208,7 +208,7 @@ struct VisionIncidentInspectorView: View {
 
             // ── New incident CTA ───────────────────────────────
             Button {
-                viewModel.showIncidentForm = true
+                openWindow(id: "incident-form")
             } label: {
                 Label("Log New Incident", systemImage: "plus.circle.fill")
                     .font(.subheadline.weight(.semibold))
@@ -595,9 +595,9 @@ struct BodyMap3DCanvasView: View {
             RealityView { (content: inout RealityViewContent, attachments: RealityViewAttachments) in
                 var usdzShown = false
 
-                // Smaller pins for the tiny windowed view
-                viewModel.pinRadius     = 0.008
-                viewModel.pinGlowRadius = 0.014
+                // Tiny red pins for the small windowed body
+                viewModel.pinRadius     = 0.005
+                viewModel.pinGlowRadius = 0.009
 
                 // ── Try to load Child.usdz from RealityKitContent ─────────────
                 let candidateNames = ["Child", "Child.usdz"]
@@ -612,12 +612,17 @@ struct BodyMap3DCanvasView: View {
                     }
                 }
 
+                // Build / position the body, then pre-spawn pins from existing
+                // markers using the LOCAL references we just made — reading
+                // @State here would return nil because SwiftUI defers writes.
+                var resolvedBodyRoot: Entity? = nil
+                var resolvedBounds: BoundingBox? = nil
+
                 if let modelEntity = loadedEntity {
                     let bodyRoot = Entity()
                     bodyRoot.name = "BodyRoot"
                     bodyRoot.addChild(modelEntity)
 
-                    // Scale to ~0.40 m tall to fit the small windowed view.
                     autoScaleEntity(modelEntity, targetMetres: 0.40)
                     applyInspectorBodyMaterial(to: bodyRoot)
                     addInspectorInteraction(to: bodyRoot)
@@ -627,8 +632,10 @@ struct BodyMap3DCanvasView: View {
                     bodyRoot.position = SIMD3(0, -0.20 + feetOffset, -0.05)
 
                     content.add(bodyRoot)
-                    localBodyRoot   = bodyRoot
-                    localBodyBounds = bounds
+                    resolvedBodyRoot = bodyRoot
+                    resolvedBounds   = bounds
+                    localBodyRoot    = bodyRoot
+                    localBodyBounds  = bounds
                     viewModel.bodyRootEntity = bodyRoot
                     viewModel.isBodyModelReady = true
                     usdzShown = true
@@ -636,15 +643,24 @@ struct BodyMap3DCanvasView: View {
                     print("📏 [Inspector] Bounds extents = \(bounds.extents)")
                 }
 
-                // ── Procedural fallback ───────────────────────────────────────
                 if !usdzShown {
                     print("❌ [Inspector] No USDZ — using procedural body")
                     viewModel.buildBody(in: content)
                     viewModel.bodyRootEntity.scale    = SIMD3(repeating: 0.28)
                     viewModel.bodyRootEntity.position = SIMD3(0, -0.04, -0.05)
-                    localBodyRoot   = viewModel.bodyRootEntity
-                    localBodyBounds = BoundingBox(min: SIMD3(-0.18, -0.50, -0.06),
-                                                  max: SIMD3( 0.18,  0.84,  0.06))
+                    let bounds = BoundingBox(min: SIMD3(-0.18, -0.50, -0.06),
+                                             max: SIMD3( 0.18,  0.84,  0.06))
+                    resolvedBodyRoot = viewModel.bodyRootEntity
+                    resolvedBounds   = bounds
+                    localBodyRoot    = viewModel.bodyRootEntity
+                    localBodyBounds  = bounds
+                }
+
+                // Pre-spawn pins from any existing markers
+                if let bodyRoot = resolvedBodyRoot {
+                    viewModel.syncPendingPin(in: content,
+                                            bodyRoot: bodyRoot,
+                                            bodyBounds: resolvedBounds)
                 }
             } update: { (content: inout RealityViewContent, attachments: RealityViewAttachments) in
                 guard let bodyRoot = localBodyRoot else { return }
@@ -679,20 +695,28 @@ struct BodyMap3DCanvasView: View {
                 }
             }
             .gesture(
-                // Windowed inspector is view-only: tapping an existing pin
-                // selects/inspects it, but tapping empty body does NOT add a
-                // new marker. New markers can only be placed in the immersive
-                // view.
+                // Windowed inspector is the ONLY place users can mark injuries.
+                // We require the tap target to actually be inside the body's
+                // entity tree, so taps on the floating info panel never add a
+                // stray marker to the body.
                 SpatialTapGesture()
                     .targetedToAnyEntity()
                     .onEnded { value in
-                        guard let mid = viewModel.markerID(forTappedEntity: value.entity) else {
+                        if let mid = viewModel.markerID(forTappedEntity: value.entity) {
+                            withAnimation(.spring(response: 0.25)) {
+                                viewModel.selectedMarkerID =
+                                    viewModel.selectedMarkerID == mid ? nil : mid
+                            }
                             return
                         }
-                        withAnimation(.spring(response: 0.25)) {
-                            viewModel.selectedMarkerID =
-                                viewModel.selectedMarkerID == mid ? nil : mid
+                        guard let bodyRoot = localBodyRoot,
+                              isDescendant(value.entity, of: bodyRoot) else {
+                            return            // tap was on the panel or elsewhere — ignore
                         }
+                        let scenePt = value.convert(value.location3D, from: .local, to: .scene)
+                        let world = SIMD3<Float>(Float(scenePt.x), Float(scenePt.y), Float(scenePt.z))
+                        print("📍 [Inspector] Tap → world \(world)")
+                        viewModel.pendingTapWorldPosition = world
                     }
             )
 
@@ -700,16 +724,16 @@ struct BodyMap3DCanvasView: View {
             BodyViewModePicker(viewModel: viewModel)
                 .padding(.top, 8)
 
-            // Hint — windowed view is view-only; users add markers in immersive.
+            // Hint — windowed view is where users tap to mark.
             if viewModel.injuryMarkers.isEmpty && viewModel.isBodyModelReady {
                 VStack(spacing: 6) {
-                    Image(systemName: "visionpro")
+                    Image(systemName: "hand.tap.fill")
                         .font(.title2)
                         .foregroundStyle(Color.ncAccent)
-                    Text("Open Immersive view to mark injuries")
+                    Text("Tap any body part to mark an injury")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text("Tap a marker here to inspect it")
+                    Text("Open Immersive to view at life-size")
                         .font(.caption2)
                         .foregroundStyle(.secondary.opacity(0.7))
                 }
@@ -726,6 +750,7 @@ struct BodyMap3DCanvasView: View {
 struct InjuryAttachmentPanel: View {
     let markerID: UUID
     @Bindable var viewModel: SpatialIncidentViewModel
+    @Environment(\.openWindow) private var openWindow
 
     private var marker: SpatialInjuryMarker? {
         viewModel.injuryMarkers.first { $0.id == markerID }
@@ -774,6 +799,22 @@ struct InjuryAttachmentPanel: View {
                     .buttonStyle(.borderless)
                     .foregroundStyle(Color.ncAlert)
                 }
+
+                Divider()
+
+                // "Log Incident" opens the form in a SEPARATE WINDOW
+                // (openWindow id: "incident-form") so it floats in front of
+                // the 3D body rather than getting occluded by it.
+                Button {
+                    openWindow(id: "incident-form")
+                } label: {
+                    Label("Log Incident", systemImage: "plus.circle.fill")
+                        .font(.caption.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Color.ncAlert)
             }
             .padding(12)
             .frame(width: 280)
@@ -1020,6 +1061,57 @@ struct BodyViewModePicker: View {
         .padding(.vertical, 6)
         .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 14))
     }
+}
+
+// MARK: - Incident Form Window
+//
+// Wraps `IncidentFormSheet` inside its own SwiftUI window so the form floats
+// independently in front of the 3D body (sheets get occluded by RealityKit
+// content that extrudes out of the parent window). Opened via:
+//   openWindow(id: "incident-form")
+// from the marker panel's "Log Incident" button.
+
+struct IncidentFormWindow: View {
+    @Environment(SpatialIncidentViewModel.self) private var viewModel
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismissWindow) private var dismissWindow
+
+    var body: some View {
+        if let child = viewModel.selectedChild {
+            IncidentFormSheet(child: child, viewModel: viewModel, context: modelContext)
+                .onChange(of: viewModel.showSaveConfirmation) { _, saved in
+                    if saved { dismissWindow(id: "incident-form") }
+                }
+        } else {
+            VStack(spacing: 12) {
+                Image(systemName: "person.crop.circle.badge.questionmark")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.secondary)
+                Text("No child selected")
+                    .font(.title3)
+                Text("Pick a child in the inspector to log an incident.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(40)
+            .glassBackgroundEffect()
+        }
+    }
+}
+
+// MARK: - Entity Hierarchy Helper
+
+/// Returns true if `entity` is `ancestor` or anywhere underneath it.
+/// Used to reject taps that landed on a floating attachment panel rather than
+/// the body mesh itself.
+@MainActor
+func isDescendant(_ entity: Entity, of ancestor: Entity) -> Bool {
+    var current: Entity? = entity
+    while let c = current {
+        if c === ancestor { return true }
+        current = c.parent
+    }
+    return false
 }
 
 // MARK: - USDZ Body Helpers

@@ -39,6 +39,17 @@ struct NurseryConnectVisionApp: App {
         .windowStyle(.plain)
         .defaultSize(width: 1120, height: 780)
 
+        // Incident form lives in its own window so it floats in front of the
+        // 3D body and stays usable in immersive contexts (sheets can't open
+        // there). The button in the marker panel calls openWindow(id:).
+        WindowGroup(id: "incident-form") {
+            IncidentFormWindow()
+                .modelContainer(container)
+                .environment(sharedViewModel)
+        }
+        .defaultSize(width: 560, height: 640)
+        .windowResizability(.contentSize)
+
         ImmersiveSpace(id: "BodyMapImmersive") {
             ImmersiveBodyMapView()
                 .modelContainer(container)

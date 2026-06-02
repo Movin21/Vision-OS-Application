@@ -4,6 +4,7 @@ import SwiftUI
 import RealityKit
 import RealityKitContent
 import SwiftData
+import Combine
 
 // MARK: - ImmersiveBodyMapView
 
@@ -12,21 +13,22 @@ struct ImmersiveBodyMapView: View {
     @Environment(SpatialIncidentViewModel.self) private var vm
     @Environment(\.modelContext) private var modelContext
 
-    /// Accumulated drag yaw so each new drag picks up where the last left off.
+    /// Accumulated yaw from user drags (radians) — each new drag picks up
+    /// where the previous one finished so the user can spin the body freely.
     @State private var dragStartYaw: Float = 0
+    @State private var userYaw: Float = 0
     /// This view's own bodyRoot + bounds, used by syncPendingPin.
     @State private var localBodyRoot: Entity? = nil
     @State private var localBodyBounds: BoundingBox? = nil
 
     var body: some View {
-        @Bindable var bvm = vm
-
         RealityView { (content: inout RealityViewContent, attachments: RealityViewAttachments) in
             var usdzShown = false
 
-            // Larger pins for the life-size immersive body
-            vm.pinRadius     = 0.018
-            vm.pinGlowRadius = 0.030
+            // Small red pins (1 cm sphere with a 2 cm halo) — bright enough to
+            // spot at arm's length but no longer chunky.
+            vm.pinRadius     = 0.010
+            vm.pinGlowRadius = 0.020
 
             let candidateNames = ["Child", "Child.usdz"]
             var loadedEntity: Entity? = nil
@@ -39,6 +41,9 @@ struct ImmersiveBodyMapView: View {
                     print("⚠️ [BodyMap] Could not load '\(name)': \(error.localizedDescription)")
                 }
             }
+
+            var resolvedBodyRoot: Entity? = nil
+            var resolvedBounds: BoundingBox? = nil
 
             if let modelEntity = loadedEntity {
 
@@ -57,8 +62,10 @@ struct ImmersiveBodyMapView: View {
                 print("📏 [BodyMap] Bounds extents = \(bounds.extents), feetOffset = \(feetOffset)")
 
                 content.add(bodyRoot)
-                localBodyRoot   = bodyRoot
-                localBodyBounds = bounds
+                resolvedBodyRoot = bodyRoot
+                resolvedBounds   = bounds
+                localBodyRoot    = bodyRoot
+                localBodyBounds  = bounds
                 vm.bodyRootEntity = bodyRoot
                 usdzShown = true
             } else {
@@ -69,12 +76,24 @@ struct ImmersiveBodyMapView: View {
                 vm.buildBody(in: content)
                 vm.bodyRootEntity.scale    = SIMD3(repeating: 1.0)
                 vm.bodyRootEntity.position = SIMD3(0, 0.505, -1.5)
-                localBodyRoot   = vm.bodyRootEntity
-                localBodyBounds = BoundingBox(min: SIMD3(-0.18, -0.50, -0.06),
-                                              max: SIMD3( 0.18,  0.84,  0.06))
+                let bounds = BoundingBox(min: SIMD3(-0.18, -0.50, -0.06),
+                                         max: SIMD3( 0.18,  0.84,  0.06))
+                resolvedBodyRoot = vm.bodyRootEntity
+                resolvedBounds   = bounds
+                localBodyRoot    = vm.bodyRootEntity
+                localBodyBounds  = bounds
             }
 
             vm.isBodyModelReady = true
+
+            // Pre-spawn red pins for every existing marker so they appear
+            // immediately when the immersive space opens — using the just-
+            // built references, not the @State values (which SwiftUI defers).
+            if let bodyRoot = resolvedBodyRoot {
+                vm.syncPendingPin(in: content,
+                                  bodyRoot: bodyRoot,
+                                  bodyBounds: resolvedBounds)
+            }
 
             // ── Floor glow disc ───────────────────────────────────────────────
             let discMesh = MeshResource.generateCylinder(height: 0.003, radius: 0.58)
@@ -83,6 +102,14 @@ struct ImmersiveBodyMapView: View {
             let disc = ModelEntity(mesh: discMesh, materials: [discMat])
             disc.position = SIMD3(0, 0.002, -1.5)
             content.add(disc)
+
+            // Floating rotation control panel — placed to the right of the body
+            // at chest height so it's always in easy reach for the user.
+            if let rotateUI = attachments.entity(for: "rotate-controls") {
+                rotateUI.position = SIMD3(0.85, 0.55, -1.4)
+                rotateUI.components.set(BillboardComponent())
+                content.add(rotateUI)
+            }
         } update: { (content: inout RealityViewContent, attachments: RealityViewAttachments) in
             guard let bodyRoot = localBodyRoot else { return }
 
@@ -90,8 +117,8 @@ struct ImmersiveBodyMapView: View {
                               bodyRoot: bodyRoot,
                               bodyBounds: localBodyBounds)
 
-            // Apply combined Y-rotation: view-mode (cardinal) + extra yaw (drag).
-            let totalAngle = vm.bodyViewMode.angleRadians + vm.bodyExtraYaw
+            // Combined Y-rotation: cardinal view-mode + user's drag yaw.
+            let totalAngle = vm.bodyViewMode.angleRadians + userYaw
             bodyRoot.transform.rotation =
                 simd_quatf(angle: totalAngle, axis: SIMD3(0, 1, 0))
 
@@ -108,49 +135,50 @@ struct ImmersiveBodyMapView: View {
         } attachments: {
             ForEach(vm.injuryMarkers) { marker in
                 Attachment(id: marker.id) {
-                    ImmersiveInjuryPanel(markerID: marker.id, viewModel: vm) {
-                        bvm.showIncidentForm = true
-                    }
+                    ImmersiveInjuryPanel(markerID: marker.id, viewModel: vm)
                 }
+            }
+            // Floating rotation control panel — sits next to the body so the
+            // user always has a guaranteed way to spin it even if the drag
+            // gesture misses.
+            Attachment(id: "rotate-controls") {
+                ImmersiveRotateControls(userYaw: $userYaw, dragStartYaw: $dragStartYaw)
             }
         }
         .simultaneousGesture(
+            // Immersive is VIEW-ONLY. Tapping a marker pops its info panel,
+            // tapping empty body does nothing. New markers must be placed in
+            // the windowed inspector.
             SpatialTapGesture()
                 .targetedToAnyEntity()
                 .onEnded { value in
-                    if let mid = vm.markerID(forTappedEntity: value.entity) {
-                        withAnimation(.spring(response: 0.25)) {
-                            vm.selectedMarkerID =
-                                vm.selectedMarkerID == mid ? nil : mid
-                        }
+                    guard let mid = vm.markerID(forTappedEntity: value.entity) else {
                         return
                     }
-
-                    let scenePt = value.convert(value.location3D, from: .local, to: .scene)
-                    let world = SIMD3<Float>(Float(scenePt.x), Float(scenePt.y), Float(scenePt.z))
-                    print("📍 [Immersive] Tap → world \(world)")
-                    vm.pendingTapWorldPosition = world
+                    withAnimation(.spring(response: 0.25)) {
+                        vm.selectedMarkerID =
+                            vm.selectedMarkerID == mid ? nil : mid
+                    }
                 }
         )
+        // Manual rotation: drag horizontally ANYWHERE in the immersive view
+        // to spin the body around its Y axis. Dropping `.targetedToAnyEntity()`
+        // lets the drag fire even on empty space, not only on the body mesh.
         .simultaneousGesture(
-            // Drag horizontally anywhere to spin the body 360° around Y.
-            DragGesture(minimumDistance: 30)
-                .targetedToAnyEntity()
+            DragGesture(minimumDistance: 5)
                 .onChanged { value in
-                    let deltaX = Float(value.translation.width) * 0.005
-                    vm.bodyExtraYaw = dragStartYaw + deltaX
+                    let deltaX = Float(value.translation.width) * 0.012
+                    userYaw = dragStartYaw + deltaX
                 }
                 .onEnded { value in
-                    let deltaX = Float(value.translation.width) * 0.005
+                    let deltaX = Float(value.translation.width) * 0.012
                     dragStartYaw += deltaX
-                    vm.bodyExtraYaw = dragStartYaw
+                    userYaw = dragStartYaw
                 }
         )
-        .sheet(isPresented: $bvm.showIncidentForm) {
-            if let child = vm.selectedChild {
-                IncidentFormSheet(child: child, viewModel: vm, context: modelContext)
-            }
-        }
+        // .sheet intentionally NOT attached here — sheets aren't supported in
+        // immersive contexts on visionOS, so the IncidentFormSheet must be
+        // presented from the windowed inspector instead.
         .onDisappear {
             vm.isBodyModelReady = false
         }
@@ -205,7 +233,6 @@ struct ImmersiveInjuryPanel: View {
 
     let markerID: UUID
     let viewModel: SpatialIncidentViewModel
-    let onLogReport: () -> Void
 
     @State private var localNote: String = ""
 
@@ -316,15 +343,16 @@ struct ImmersiveInjuryPanel: View {
 
                 Divider()
 
-                // Footer
-                HStack(spacing: 12) {
-                    Button(action: onLogReport) {
-                        Label("Log Incident", systemImage: "plus.circle.fill")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Color.ncAlert)
+                // Footer — immersive panels are read-only; the "Log Incident"
+                // workflow lives in the windowed inspector (sheets can't open
+                // inside an immersive space on visionOS).
+                HStack(spacing: 8) {
+                    Image(systemName: "eye.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("Use the inspector window to log this incident")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
                 .padding(14)
             }
@@ -355,6 +383,68 @@ struct ImmersiveInjuryPanel: View {
         case .swelling: return Color(red: 0.98, green: 0.52, blue: 0.04)
         case .burn:     return Color(red: 0.96, green: 0.30, blue: 0.08)
         case .redness:  return Color(red: 0.92, green: 0.22, blue: 0.28)
+        }
+    }
+}
+
+// MARK: - Immersive Rotation Controls
+
+/// Floating glass panel placed beside the body in immersive space. Lets the
+/// user spin the body in 45° steps or jump straight to cardinal directions —
+/// a guaranteed UI fallback when the drag gesture is hard to hit.
+struct ImmersiveRotateControls: View {
+    @Binding var userYaw: Float
+    @Binding var dragStartYaw: Float
+
+    var body: some View {
+        VStack(spacing: 14) {
+            HStack(spacing: 4) {
+                Image(systemName: "rotate.3d")
+                Text("Rotate")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .foregroundStyle(.secondary)
+
+            HStack(spacing: 10) {
+                Button {
+                    bumpYaw(by: -.pi / 4)
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.title3)
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    bumpYaw(by: .pi / 4)
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.title3)
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.bordered)
+            }
+
+            Button {
+                userYaw = 0
+                dragStartYaw = 0
+            } label: {
+                Label("Reset", systemImage: "arrow.uturn.left")
+                    .font(.caption.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.gray)
+        }
+        .padding(14)
+        .frame(width: 180)
+        .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func bumpYaw(by delta: Float) {
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
+            dragStartYaw += delta
+            userYaw = dragStartYaw
         }
     }
 }

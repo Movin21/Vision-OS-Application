@@ -163,9 +163,9 @@ final class SpatialIncidentViewModel {
 
     // MARK: Pin appearance (configurable per view)
     /// Radius of the colored pin sphere in metres.
-    var pinRadius: Float = 0.014
+    var pinRadius: Float = 0.010
     /// Radius of the translucent halo behind each pin in metres.
-    var pinGlowRadius: Float = 0.022
+    var pinGlowRadius: Float = 0.016
 
     // MARK: Body view mode (front / back / left / right)
     var bodyViewMode: BodyMapViewMode = .front
@@ -274,7 +274,10 @@ final class SpatialIncidentViewModel {
     /// missing pins are spawned, deleted markers' pins are removed, and
     /// type changes update materials in place.
     private func syncPinEntities(in bodyRoot: Entity, bounds: BoundingBox?) {
-        guard let bounds = bounds else { return }
+        guard let bounds = bounds else {
+            print("⚠️ [syncPins] bounds nil — skip (markers=\(injuryMarkers.count))")
+            return
+        }
 
         var existing: [UUID: ModelEntity] = [:]
         for child in bodyRoot.children where child.name.hasPrefix("pin-") {
@@ -284,6 +287,7 @@ final class SpatialIncidentViewModel {
             }
         }
 
+        var spawned = 0
         for marker in injuryMarkers {
             let local = unnormalize(marker.normalizedPosition, in: bounds)
             if let pin = existing[marker.id] {
@@ -293,12 +297,17 @@ final class SpatialIncidentViewModel {
                 let pin = makePinEntity(at: local, type: marker.injuryType)
                 pin.name = "pin-\(marker.id.uuidString)"
                 bodyRoot.addChild(pin)
+                spawned += 1
+                print("🟥 [syncPins] spawned pin id=\(marker.id.uuidString.prefix(6)) at local=\(local) (markers=\(injuryMarkers.count))")
             }
         }
 
         let validIDs = Set(injuryMarkers.map { $0.id })
         for (id, pin) in existing where !validIDs.contains(id) {
             pin.removeFromParent()
+        }
+        if spawned == 0 && !injuryMarkers.isEmpty && existing.count == injuryMarkers.count {
+            print("✓ [syncPins] all \(injuryMarkers.count) pins already present")
         }
     }
 
@@ -319,11 +328,14 @@ final class SpatialIncidentViewModel {
     }
 
     /// Inverse of `normalize`: expands [0,1] back into body-local coords with a
-    /// small outward offset so the pin sits on the surface, not buried inside.
+    /// generous outward offset so the pin floats clearly off the surface and
+    /// is never occluded by the body's opaque PBR material.
     private func unnormalize(_ n: SIMD3<Float>, in bounds: BoundingBox) -> SIMD3<Float> {
         let minB = bounds.min
         let ext  = bounds.extents
-        let offset = pinRadius * 0.5
+        // 3 pin-radii outside the mesh — guaranteed-visible halo around
+        // every marker even on a fully opaque skin material.
+        let offset = pinRadius * 3.0
         let zSurface = n.z > 0.5 ? bounds.max.z + offset : bounds.min.z - offset
         return SIMD3<Float>(
             minB.x + n.x * ext.x,
@@ -485,19 +497,29 @@ final class SpatialIncidentViewModel {
     private func makePinEntity(at position: SIMD3<Float>, type: InjuryType) -> ModelEntity {
         let r = pinRadius
         let mesh = MeshResource.generateSphere(radius: r)
-        let entity = ModelEntity(mesh: mesh, materials: [])
+
+        // Build the red material at init time so the pin is *guaranteed* to
+        // render with the right colour from the first frame (an empty
+        // `materials: []` would silently render the pin with no material).
+        let red = UIColor(red: 0.95, green: 0.12, blue: 0.12, alpha: 1.0)
+        var pinMat = PhysicallyBasedMaterial()
+        pinMat.baseColor         = .init(tint: red)
+        pinMat.emissiveColor     = .init(color: UIColor(red: 1.0, green: 0.25, blue: 0.20, alpha: 1.0))
+        pinMat.emissiveIntensity = 1.8
+        pinMat.roughness         = 0.20
+        pinMat.metallic          = 0.0
+
+        let entity = ModelEntity(mesh: mesh, materials: [pinMat])
         entity.name = "injuryPin"
         entity.position = position
         entity.components.set(InputTargetComponent())
         entity.components.set(CollisionComponent(shapes: [.generateSphere(radius: r * 1.4)]))
         entity.components.set(HoverEffectComponent())
-        applyPinMaterial(to: entity, type: type)
 
-        // Outer glow sphere
+        // Outer glow halo
         let glowMesh = MeshResource.generateSphere(radius: pinGlowRadius)
         var glowMat = UnlitMaterial()
-        let gc = type.pinColor
-        glowMat.color = .init(tint: gc.withAlphaComponent(0.22))
+        glowMat.color = .init(tint: red.withAlphaComponent(0.30))
         let glowSphere = ModelEntity(mesh: glowMesh, materials: [glowMat])
         glowSphere.name = "injuryPinGlow"
         entity.addChild(glowSphere)
@@ -506,22 +528,30 @@ final class SpatialIncidentViewModel {
     }
 
     private func applyPinMaterial(to entity: ModelEntity, type: InjuryType) {
+        // All pins are bright red regardless of injury type. The type lives on
+        // the marker data and shows in the floating info panel.
+        let red = UIColor(red: 0.95, green: 0.12, blue: 0.12, alpha: 1.0)
         var mat = PhysicallyBasedMaterial()
-        let c = type.pinColor
-        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        c.getRed(&r, green: &g, blue: &b, alpha: &a)
-        mat.baseColor       = .init(tint: UIColor(red: r, green: g, blue: b, alpha: 1))
-        mat.emissiveColor   = .init(color: UIColor(red: min(r * 1.4, 1), green: min(g * 1.4, 1), blue: min(b * 1.4, 1), alpha: 1))
-        mat.emissiveIntensity = 1.4
-        mat.roughness       = 0.2
-        mat.metallic        = 0.0
-        entity.model?.materials = [mat]
+        mat.baseColor         = .init(tint: red)
+        mat.emissiveColor     = .init(color: UIColor(red: 1.0, green: 0.25, blue: 0.20, alpha: 1.0))
+        mat.emissiveIntensity = 1.8
+        mat.roughness         = 0.20
+        mat.metallic          = 0.0
 
-        // Recolour the glow child if present
-        if let glowChild = entity.findEntity(named: "injuryPinGlow") as? ModelEntity {
+        // Write back through the components store to guarantee the change
+        // sticks (ModelComponent is a value type — `entity.model?.materials =`
+        // can silently no-op on the optional copy).
+        if var modelComp = entity.components[ModelComponent.self] {
+            modelComp.materials = [mat]
+            entity.components.set(modelComp)
+        }
+
+        if let glowChild = entity.findEntity(named: "injuryPinGlow") as? ModelEntity,
+           var glowComp = glowChild.components[ModelComponent.self] {
             var glowMat = UnlitMaterial()
-            glowMat.color = .init(tint: type.pinColor.withAlphaComponent(0.22))
-            glowChild.model?.materials = [glowMat]
+            glowMat.color = .init(tint: red.withAlphaComponent(0.30))
+            glowComp.materials = [glowMat]
+            glowChild.components.set(glowComp)
         }
     }
 }
