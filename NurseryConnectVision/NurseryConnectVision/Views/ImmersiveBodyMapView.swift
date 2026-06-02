@@ -12,51 +12,96 @@ struct ImmersiveBodyMapView: View {
     @Environment(SpatialIncidentViewModel.self) private var vm
     @Environment(\.modelContext) private var modelContext
 
+    /// Accumulated drag yaw so each new drag picks up where the last left off.
+    @State private var dragStartYaw: Float = 0
+    /// This view's own bodyRoot + bounds, used by syncPendingPin.
+    @State private var localBodyRoot: Entity? = nil
+    @State private var localBodyBounds: BoundingBox? = nil
+
     var body: some View {
         @Bindable var bvm = vm
 
         RealityView { (content: inout RealityViewContent, attachments: RealityViewAttachments) in
-            do {
-                let scene = try await Entity(named: "Scene", in: realityKitContentBundle)
+            var usdzShown = false
 
-                let bodyRoot = scene.findEntity(named: "HumanBody") ?? scene
+            // Larger pins for the life-size immersive body
+            vm.pinRadius     = 0.018
+            vm.pinGlowRadius = 0.030
+
+            let candidateNames = ["Child", "Child.usdz"]
+            var loadedEntity: Entity? = nil
+            for name in candidateNames {
+                do {
+                    loadedEntity = try await Entity(named: name, in: realityKitContentBundle)
+                    print("✅ [BodyMap] Loaded USDZ as '\(name)'")
+                    break
+                } catch {
+                    print("⚠️ [BodyMap] Could not load '\(name)': \(error.localizedDescription)")
+                }
+            }
+
+            if let modelEntity = loadedEntity {
+
+                let bodyRoot = Entity()
                 bodyRoot.name = "BodyRoot"
+                bodyRoot.addChild(modelEntity)
 
+                autoScaleToHeight(modelEntity, targetMetres: 0.95)
                 applyBodyMaterial(to: bodyRoot)
                 addInteraction(to: bodyRoot)
 
-                // HumanBody.obj is exported from 3ds Max — Y spans 0 to 20.68 units.
-                // Scale = 1.35 / 20.74 = 0.065 gives a child-height body (1.35 m).
-                // Foot Y-min is -0.057 units → 0.004 m lift keeps feet at floor level.
-                scene.scale    = SIMD3(repeating: 0.065)
-                scene.position = SIMD3(0, 0.004, -1.5)
+                let bounds = modelEntity.visualBounds(relativeTo: bodyRoot)
+                let feetOffset = -bounds.min.y
+                bodyRoot.position = SIMD3(0, feetOffset, -1.5)
 
-                // Entrance: grow from near-zero to final transform
-                let finalTransform = scene.transform
-                scene.scale = SIMD3(repeating: 0.001)
-                content.add(scene)
-                scene.move(to: finalTransform, relativeTo: scene.parent,
-                           duration: 0.9, timingFunction: .easeOut)
+                print("📏 [BodyMap] Bounds extents = \(bounds.extents), feetOffset = \(feetOffset)")
 
-                // Floor glow disc
-                let discMesh = MeshResource.generateCylinder(height: 0.003, radius: 0.58)
-                var discMat  = UnlitMaterial()
-                discMat.color = .init(tint: UIColor(red: 0.16, green: 0.55, blue: 0.88, alpha: 0.18))
-                let disc = ModelEntity(mesh: discMesh, materials: [discMat])
-                disc.position = SIMD3(0, 0.002, -1.5)
-                content.add(disc)
-
-                vm.bodyRootEntity  = scene
-                vm.isBodyModelReady = true
-
-            } catch {
-                vm.buildBody(in: content)
+                content.add(bodyRoot)
+                localBodyRoot   = bodyRoot
+                localBodyBounds = bounds
+                vm.bodyRootEntity = bodyRoot
+                usdzShown = true
+            } else {
+                print("❌ [BodyMap] No USDZ loaded — falling back to procedural body.")
             }
+
+            if !usdzShown {
+                vm.buildBody(in: content)
+                vm.bodyRootEntity.scale    = SIMD3(repeating: 1.0)
+                vm.bodyRootEntity.position = SIMD3(0, 0.505, -1.5)
+                localBodyRoot   = vm.bodyRootEntity
+                localBodyBounds = BoundingBox(min: SIMD3(-0.18, -0.50, -0.06),
+                                              max: SIMD3( 0.18,  0.84,  0.06))
+            }
+
+            vm.isBodyModelReady = true
+
+            // ── Floor glow disc ───────────────────────────────────────────────
+            let discMesh = MeshResource.generateCylinder(height: 0.003, radius: 0.58)
+            var discMat  = UnlitMaterial()
+            discMat.color = .init(tint: UIColor(red: 0.16, green: 0.55, blue: 0.88, alpha: 0.18))
+            let disc = ModelEntity(mesh: discMesh, materials: [discMat])
+            disc.position = SIMD3(0, 0.002, -1.5)
+            content.add(disc)
         } update: { (content: inout RealityViewContent, attachments: RealityViewAttachments) in
-            vm.syncPendingPin(in: content)
+            guard let bodyRoot = localBodyRoot else { return }
+
+            vm.syncPendingPin(in: content,
+                              bodyRoot: bodyRoot,
+                              bodyBounds: localBodyBounds)
+
+            // Apply combined Y-rotation: view-mode (cardinal) + extra yaw (drag).
+            let totalAngle = vm.bodyViewMode.angleRadians + vm.bodyExtraYaw
+            bodyRoot.transform.rotation =
+                simd_quatf(angle: totalAngle, axis: SIMD3(0, 1, 0))
+
+            // Attachment panels follow each pin's current world position so
+            // they stay glued to their pins as the body rotates.
             for marker in vm.injuryMarkers {
-                if let entity = attachments.entity(for: marker.id) {
-                    entity.position = marker.worldPosition + SIMD3<Float>(0.20, 0.14, 0.14)
+                if let entity = attachments.entity(for: marker.id),
+                   let pin = bodyRoot.findEntity(named: "pin-\(marker.id.uuidString)") {
+                    let pinWorld = pin.position(relativeTo: nil)
+                    entity.position = pinWorld + SIMD3<Float>(0.20, 0.14, 0.14)
                     if entity.parent == nil { content.add(entity) }
                 }
             }
@@ -69,33 +114,36 @@ struct ImmersiveBodyMapView: View {
                 }
             }
         }
-        .gesture(
+        .simultaneousGesture(
             SpatialTapGesture()
                 .targetedToAnyEntity()
                 .onEnded { value in
-                    let name = value.entity.name
-                    if name == "injuryPin" || name == "injuryPinGlow" {
-                        let pinEntity: Entity
-                        if name == "injuryPinGlow" {
-                            pinEntity = value.entity.parent ?? value.entity
-                        } else {
-                            pinEntity = value.entity
-                        }
-                        if let match = vm.injuryMarkers.first(
-                            where: { $0.pinEntity === (pinEntity as? ModelEntity) }
-                        ) {
-                            withAnimation(.spring(response: 0.25)) {
-                                vm.selectedMarkerID =
-                                    vm.selectedMarkerID == match.id ? nil : match.id
-                            }
+                    if let mid = vm.markerID(forTappedEntity: value.entity) {
+                        withAnimation(.spring(response: 0.25)) {
+                            vm.selectedMarkerID =
+                                vm.selectedMarkerID == mid ? nil : mid
                         }
                         return
                     }
 
-                    let localPt = value.location3D
-                    let local = SIMD3<Float>(Float(localPt.x), Float(localPt.y), Float(localPt.z))
-                    let world = value.entity.convert(position: local, to: nil)
-                    vm.pendingTapWorldPosition = world + SIMD3<Float>(0, 0, 0.03)
+                    let scenePt = value.convert(value.location3D, from: .local, to: .scene)
+                    let world = SIMD3<Float>(Float(scenePt.x), Float(scenePt.y), Float(scenePt.z))
+                    print("📍 [Immersive] Tap → world \(world)")
+                    vm.pendingTapWorldPosition = world
+                }
+        )
+        .simultaneousGesture(
+            // Drag horizontally anywhere to spin the body 360° around Y.
+            DragGesture(minimumDistance: 30)
+                .targetedToAnyEntity()
+                .onChanged { value in
+                    let deltaX = Float(value.translation.width) * 0.005
+                    vm.bodyExtraYaw = dragStartYaw + deltaX
+                }
+                .onEnded { value in
+                    let deltaX = Float(value.translation.width) * 0.005
+                    dragStartYaw += deltaX
+                    vm.bodyExtraYaw = dragStartYaw
                 }
         )
         .sheet(isPresented: $bvm.showIncidentForm) {
@@ -111,14 +159,15 @@ struct ImmersiveBodyMapView: View {
     // MARK: - Private Helpers
 
     private func applyBodyMaterial(to entity: Entity) {
-        if let model = entity as? ModelEntity {
+        if var modelComp = entity.components[ModelComponent.self] {
             var mat = PhysicallyBasedMaterial()
             mat.baseColor = .init(tint: UIColor(red: 0.89, green: 0.77, blue: 0.66, alpha: 1))
             mat.roughness = 0.70
             mat.metallic  = 0.0
             mat.emissiveColor     = .init(color: UIColor(red: 0.22, green: 0.13, blue: 0.06, alpha: 1))
             mat.emissiveIntensity = 0.10
-            model.model?.materials = [mat]
+            modelComp.materials = [mat]
+            entity.components[ModelComponent.self] = modelComp
         }
         for child in entity.children {
             applyBodyMaterial(to: child)
@@ -126,14 +175,27 @@ struct ImmersiveBodyMapView: View {
     }
 
     private func addInteraction(to entity: Entity) {
-        if let model = entity as? ModelEntity {
-            model.generateCollisionShapes(recursive: false)
-            model.components.set(InputTargetComponent(allowedInputTypes: .indirect))
-            model.components.set(HoverEffectComponent())
+        if entity.components[ModelComponent.self] != nil {
+            Task { @MainActor in
+                entity.generateCollisionShapes(recursive: false)
+                entity.components.set(InputTargetComponent(allowedInputTypes: .indirect))
+                entity.components.set(HoverEffectComponent())
+            }
         }
         for child in entity.children {
             addInteraction(to: child)
         }
+    }
+
+    /// Scales an entity so its visual bounding-box height matches `targetMetres`.
+    /// Works regardless of the source model's native units (cm, mm, in, m).
+    private func autoScaleToHeight(_ entity: Entity, targetMetres: Float) {
+        entity.scale = SIMD3<Float>(repeating: 1.0)
+        let bounds = entity.visualBounds(relativeTo: entity)
+        let rawHeight = bounds.extents.y
+        guard rawHeight > 0.0001 else { return }
+        let s = targetMetres / rawHeight
+        entity.scale = SIMD3<Float>(repeating: s)
     }
 }
 

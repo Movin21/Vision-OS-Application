@@ -14,6 +14,7 @@
 
 import SwiftUI
 import RealityKit
+import RealityKitContent
 import SwiftData
 
 // MARK: - Main View
@@ -584,15 +585,89 @@ struct VisionIncidentInspectorView: View {
 struct BodyMap3DCanvasView: View {
     @Bindable var viewModel: SpatialIncidentViewModel
 
+    /// This view's own bodyRoot and bounds — kept locally so each open
+    /// RealityView re-spawns its own pin entities from the shared marker list.
+    @State private var localBodyRoot: Entity? = nil
+    @State private var localBodyBounds: BoundingBox? = nil
+
     var body: some View {
-        ZStack {
+        ZStack(alignment: .top) {
             RealityView { (content: inout RealityViewContent, attachments: RealityViewAttachments) in
-                viewModel.buildBody(in: content)
+                var usdzShown = false
+
+                // Smaller pins for the tiny windowed view
+                viewModel.pinRadius     = 0.008
+                viewModel.pinGlowRadius = 0.014
+
+                // ── Try to load Child.usdz from RealityKitContent ─────────────
+                let candidateNames = ["Child", "Child.usdz"]
+                var loadedEntity: Entity? = nil
+                for name in candidateNames {
+                    do {
+                        loadedEntity = try await Entity(named: name, in: realityKitContentBundle)
+                        print("✅ [Inspector] Loaded USDZ as '\(name)'")
+                        break
+                    } catch {
+                        print("⚠️ [Inspector] Could not load '\(name)': \(error.localizedDescription)")
+                    }
+                }
+
+                if let modelEntity = loadedEntity {
+                    let bodyRoot = Entity()
+                    bodyRoot.name = "BodyRoot"
+                    bodyRoot.addChild(modelEntity)
+
+                    // Scale to ~0.40 m tall to fit the small windowed view.
+                    autoScaleEntity(modelEntity, targetMetres: 0.40)
+                    applyInspectorBodyMaterial(to: bodyRoot)
+                    addInspectorInteraction(to: bodyRoot)
+
+                    let bounds = modelEntity.visualBounds(relativeTo: bodyRoot)
+                    let feetOffset = -bounds.min.y
+                    bodyRoot.position = SIMD3(0, -0.20 + feetOffset, -0.05)
+
+                    content.add(bodyRoot)
+                    localBodyRoot   = bodyRoot
+                    localBodyBounds = bounds
+                    viewModel.bodyRootEntity = bodyRoot
+                    viewModel.isBodyModelReady = true
+                    usdzShown = true
+
+                    print("📏 [Inspector] Bounds extents = \(bounds.extents)")
+                }
+
+                // ── Procedural fallback ───────────────────────────────────────
+                if !usdzShown {
+                    print("❌ [Inspector] No USDZ — using procedural body")
+                    viewModel.buildBody(in: content)
+                    viewModel.bodyRootEntity.scale    = SIMD3(repeating: 0.28)
+                    viewModel.bodyRootEntity.position = SIMD3(0, -0.04, -0.05)
+                    localBodyRoot   = viewModel.bodyRootEntity
+                    localBodyBounds = BoundingBox(min: SIMD3(-0.18, -0.50, -0.06),
+                                                  max: SIMD3( 0.18,  0.84,  0.06))
+                }
             } update: { (content: inout RealityViewContent, attachments: RealityViewAttachments) in
-                viewModel.syncPendingPin(in: content)
+                guard let bodyRoot = localBodyRoot else { return }
+
+                // Spawn / reconcile pin entities from the shared marker list
+                viewModel.syncPendingPin(in: content,
+                                        bodyRoot: bodyRoot,
+                                        bodyBounds: localBodyBounds)
+
+                // Apply Front/Back/Left/Right rotation
+                bodyRoot.transform.rotation =
+                    simd_quatf(angle: viewModel.bodyViewMode.angleRadians,
+                               axis: SIMD3(0, 1, 0))
+
+                // Float attachment panels ABOVE the body (anchored at the body
+                // top, not next to the pin) so they're easy to read and never
+                // overlap the figure.
+                let bodyWorldTop = bodyRoot.position(relativeTo: nil)
+                    + SIMD3<Float>(0, (localBodyBounds?.max.y ?? 0.20) + 0.08, 0.08)
                 for marker in viewModel.injuryMarkers {
-                    if let entity = attachments.entity(for: marker.id) {
-                        entity.position = marker.worldPosition + SIMD3<Float>(0, 0.13, 0.08)
+                    if let entity = attachments.entity(for: marker.id),
+                       bodyRoot.findEntity(named: "pin-\(marker.id.uuidString)") != nil {
+                        entity.position = bodyWorldTop
                         if entity.parent == nil { content.add(entity) }
                     }
                 }
@@ -604,35 +679,39 @@ struct BodyMap3DCanvasView: View {
                 }
             }
             .gesture(
+                // Windowed inspector is view-only: tapping an existing pin
+                // selects/inspects it, but tapping empty body does NOT add a
+                // new marker. New markers can only be placed in the immersive
+                // view.
                 SpatialTapGesture()
                     .targetedToAnyEntity()
                     .onEnded { value in
-                        let entity = value.entity
-                        if entity.name == "injuryPin" {
-                            if let match = viewModel.injuryMarkers.first(
-                                where: { $0.pinEntity === (entity as? ModelEntity) }
-                            ) {
-                                withAnimation(.spring(response: 0.25)) {
-                                    viewModel.selectedMarkerID =
-                                        viewModel.selectedMarkerID == match.id ? nil : match.id
-                                }
-                            }
+                        guard let mid = viewModel.markerID(forTappedEntity: value.entity) else {
                             return
                         }
-                        let worldPos = entity.position(relativeTo: nil)
-                        viewModel.pendingTapWorldPosition = worldPos + SIMD3<Float>(0, 0, 0.07)
+                        withAnimation(.spring(response: 0.25)) {
+                            viewModel.selectedMarkerID =
+                                viewModel.selectedMarkerID == mid ? nil : mid
+                        }
                     }
             )
 
-            // Tap instruction — shown only when no pins exist yet
+            // ── Front / Back / Left / Right view-mode picker ──────────────────
+            BodyViewModePicker(viewModel: viewModel)
+                .padding(.top, 8)
+
+            // Hint — windowed view is view-only; users add markers in immersive.
             if viewModel.injuryMarkers.isEmpty && viewModel.isBodyModelReady {
                 VStack(spacing: 6) {
-                    Image(systemName: "hand.tap.fill")
+                    Image(systemName: "visionpro")
                         .font(.title2)
                         .foregroundStyle(Color.ncAccent)
-                    Text("Tap any body part to mark an injury")
+                    Text("Open Immersive view to mark injuries")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Text("Tap a marker here to inspect it")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary.opacity(0.7))
                 }
                 .padding(14)
                 .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 12))
@@ -892,5 +971,100 @@ private struct SaveConfirmationBanner: View {
         }
         .padding(.horizontal, 20).padding(.vertical, 12)
         .glassBackgroundEffect(in: Capsule())
+    }
+}
+
+// MARK: - Front / Back / Left / Right View-mode Picker
+
+struct BodyViewModePicker: View {
+    @Bindable var viewModel: SpatialIncidentViewModel
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(BodyMapViewMode.allCases) { mode in
+                Button {
+                    withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
+                        viewModel.bodyViewMode = mode
+                    }
+                } label: {
+                    VStack(spacing: 2) {
+                        Image(systemName: mode.sfSymbol)
+                            .font(.callout)
+                        Text(mode.rawValue)
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .frame(width: 56, height: 44)
+                    .background(
+                        viewModel.bodyViewMode == mode
+                            ? Color.ncAccent.opacity(0.30)
+                            : Color.clear
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(
+                                viewModel.bodyViewMode == mode
+                                    ? Color.ncAccent
+                                    : Color.white.opacity(0.18),
+                                lineWidth: 1.2
+                            )
+                    )
+                    .foregroundStyle(
+                        viewModel.bodyViewMode == mode ? Color.ncAccent : Color.secondary
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+// MARK: - USDZ Body Helpers
+
+/// Scales an entity so its visual bounding-box height matches `targetMetres`.
+/// Works regardless of the source model's native units (cm, mm, in, m).
+@MainActor
+func autoScaleEntity(_ entity: Entity, targetMetres: Float) {
+    entity.scale = SIMD3<Float>(repeating: 1.0)
+    let bounds = entity.visualBounds(relativeTo: entity)
+    let rawHeight = bounds.extents.y
+    guard rawHeight > 0.0001 else { return }
+    let s = targetMetres / rawHeight
+    entity.scale = SIMD3<Float>(repeating: s)
+}
+
+/// Applies a uniform skin-tone PBR material to every ModelComponent in the
+/// hierarchy so the USDZ looks consistent regardless of its embedded textures.
+@MainActor
+func applyInspectorBodyMaterial(to entity: Entity) {
+    if var modelComp = entity.components[ModelComponent.self] {
+        var mat = PhysicallyBasedMaterial()
+        mat.baseColor = .init(tint: UIColor(red: 0.89, green: 0.77, blue: 0.66, alpha: 1))
+        mat.roughness = 0.70
+        mat.metallic  = 0.0
+        mat.emissiveColor     = .init(color: UIColor(red: 0.22, green: 0.13, blue: 0.06, alpha: 1))
+        mat.emissiveIntensity = 0.10
+        modelComp.materials = [mat]
+        entity.components[ModelComponent.self] = modelComp
+    }
+    for child in entity.children {
+        applyInspectorBodyMaterial(to: child)
+    }
+}
+
+/// Makes every ModelComponent in the hierarchy tappable so the user can place
+/// injury pins anywhere on the body surface.
+@MainActor
+func addInspectorInteraction(to entity: Entity) {
+    if entity.components[ModelComponent.self] != nil {
+        entity.generateCollisionShapes(recursive: false)
+        entity.components.set(InputTargetComponent(allowedInputTypes: .indirect))
+        entity.components.set(HoverEffectComponent())
+    }
+    for child in entity.children {
+        addInspectorInteraction(to: child)
     }
 }

@@ -7,13 +7,4 @@
 
 def Xform "Root"
 {
-    def "HumanBody" (
-        active = true
-        prepend references = @HumanBody.obj@
-    )
-    {
-        float3 xformOp:translate = (0, 0, 0)
-        float3 xformOp:scale = (1, 1, 1)
-        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
-    }
 }

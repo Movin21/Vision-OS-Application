@@ -42,28 +42,35 @@ enum InjuryType: String, CaseIterable, Codable, Identifiable {
 
 // MARK: - Spatial Injury Marker
 
+/// Position is stored in normalized body coordinates so a marker tapped in the
+/// windowed inspector (small body) appears at the equivalent anatomical spot in
+/// the immersive view (life-size body).
+/// - x: 0 = left, 1 = right (across body width)
+/// - y: 0 = feet, 1 = top of head
+/// - z: 0 = back surface, 1 = front surface
 struct SpatialInjuryMarker: Identifiable {
     let id: UUID
-    var worldPosition: SIMD3<Float>
+    var normalizedPosition: SIMD3<Float>
     var injuryType: InjuryType
     var note: String
-    let pinEntity: ModelEntity
 
-    init(worldPosition: SIMD3<Float>, injuryType: InjuryType = .bruise, note: String = "", pinEntity: ModelEntity) {
-        self.id = UUID()
-        self.worldPosition = worldPosition
+    init(id: UUID = UUID(),
+         normalizedPosition: SIMD3<Float>,
+         injuryType: InjuryType = .bruise,
+         note: String = "") {
+        self.id = id
+        self.normalizedPosition = normalizedPosition
         self.injuryType = injuryType
         self.note = note
-        self.pinEntity = pinEntity
     }
 
     var bodyRegionName: String {
-        let y = worldPosition.y
-        if y > 1.10 { return "Head" }
-        if y > 0.85 { return "Neck / Shoulders" }
-        if y > 0.50 { return "Torso" }
-        if y > 0.20 { return "Hips / Pelvis" }
-        if y > -0.10 { return "Upper Legs" }
+        let y = normalizedPosition.y
+        if y > 0.88 { return "Head" }
+        if y > 0.78 { return "Neck / Shoulders" }
+        if y > 0.55 { return "Torso" }
+        if y > 0.45 { return "Hips / Pelvis" }
+        if y > 0.20 { return "Upper Legs" }
         return "Lower Legs / Feet"
     }
 }
@@ -82,6 +89,36 @@ enum SafetyViewFilter: String, CaseIterable, Identifiable {
         case .bodyMap:  return "figure.stand"
         case .timeline: return "clock.arrow.circlepath"
         case .alerts:   return "exclamationmark.triangle.fill"
+        }
+    }
+}
+
+// MARK: - Body Map View Mode (Front/Back/Left/Right)
+
+enum BodyMapViewMode: String, CaseIterable, Identifiable {
+    case front = "Front"
+    case back  = "Back"
+    case left  = "Left"
+    case right = "Right"
+
+    var id: String { rawValue }
+
+    /// Y-axis rotation in radians.
+    var angleRadians: Float {
+        switch self {
+        case .front: return 0
+        case .right: return .pi * 0.5
+        case .back:  return .pi
+        case .left:  return -.pi * 0.5
+        }
+    }
+
+    var sfSymbol: String {
+        switch self {
+        case .front: return "person.fill"
+        case .back:  return "person.fill.turn.down"
+        case .left:  return "person.fill.turn.left"
+        case .right: return "person.fill.turn.right"
         }
     }
 }
@@ -123,6 +160,18 @@ final class SpatialIncidentViewModel {
 
     // MARK: Immersive space
     var isImmersiveSpaceOpen = false
+
+    // MARK: Pin appearance (configurable per view)
+    /// Radius of the colored pin sphere in metres.
+    var pinRadius: Float = 0.014
+    /// Radius of the translucent halo behind each pin in metres.
+    var pinGlowRadius: Float = 0.022
+
+    // MARK: Body view mode (front / back / left / right)
+    var bodyViewMode: BodyMapViewMode = .front
+    /// Extra Y-rotation in radians applied on top of the view-mode angle
+    /// (used by the immersive drag gesture for free 360° rotation).
+    var bodyExtraYaw: Float = 0
 
     // MARK: - Body Model Construction
 
@@ -198,18 +247,101 @@ final class SpatialIncidentViewModel {
 
     // MARK: - Pin Sync (called from update closure)
 
-    /// Creates a glowing pin entity for `pendingTapWorldPosition` and appends a marker.
-    /// Must be called from inside the RealityView `update` closure so `content` is valid.
-    func syncPendingPin(in content: RealityViewContent) {
-        guard let pos = pendingTapWorldPosition else { return }
-        pendingTapWorldPosition = nil               // clear before mutation triggers another update
+    /// Processes a pending tap (converting world → normalized body coords) and
+    /// then makes sure every marker in `injuryMarkers` has a corresponding pin
+    /// entity living inside the caller's `bodyRoot`. This is what lets a marker
+    /// placed in the windowed inspector appear automatically in the immersive
+    /// view and vice versa — each view re-spawns pins from the shared list.
+    func syncPendingPin(in content: RealityViewContent,
+                        bodyRoot: Entity,
+                        bodyBounds: BoundingBox?) {
+        // Resolve a pending tap into a normalized marker
+        if let world = pendingTapWorldPosition, let bounds = bodyBounds {
+            pendingTapWorldPosition = nil
+            let local = bodyRoot.convert(position: world, from: nil)
+            let normalized = normalize(local, in: bounds)
+            let marker = SpatialInjuryMarker(normalizedPosition: normalized, injuryType: .bruise)
+            injuryMarkers.append(marker)
+            selectedMarkerID = marker.id
+            print("📌 [Pin] norm=\(normalized) count=\(injuryMarkers.count)")
+        }
 
-        let pinEntity = makePinEntity(at: pos, type: .bruise)
-        content.add(pinEntity)
+        // Reconcile entity tree against the markers list
+        syncPinEntities(in: bodyRoot, bounds: bodyBounds)
+    }
 
-        let marker = SpatialInjuryMarker(worldPosition: pos, injuryType: .bruise, pinEntity: pinEntity)
-        injuryMarkers.append(marker)
-        selectedMarkerID = marker.id
+    /// Ensures the children of `bodyRoot` exactly mirror `injuryMarkers`:
+    /// missing pins are spawned, deleted markers' pins are removed, and
+    /// type changes update materials in place.
+    private func syncPinEntities(in bodyRoot: Entity, bounds: BoundingBox?) {
+        guard let bounds = bounds else { return }
+
+        var existing: [UUID: ModelEntity] = [:]
+        for child in bodyRoot.children where child.name.hasPrefix("pin-") {
+            let idStr = String(child.name.dropFirst(4))
+            if let id = UUID(uuidString: idStr), let me = child as? ModelEntity {
+                existing[id] = me
+            }
+        }
+
+        for marker in injuryMarkers {
+            let local = unnormalize(marker.normalizedPosition, in: bounds)
+            if let pin = existing[marker.id] {
+                pin.position = local
+                applyPinMaterial(to: pin, type: marker.injuryType)
+            } else {
+                let pin = makePinEntity(at: local, type: marker.injuryType)
+                pin.name = "pin-\(marker.id.uuidString)"
+                bodyRoot.addChild(pin)
+            }
+        }
+
+        let validIDs = Set(injuryMarkers.map { $0.id })
+        for (id, pin) in existing where !validIDs.contains(id) {
+            pin.removeFromParent()
+        }
+    }
+
+    /// Convert a body-local point into [0,1] normalized coords, clamping XY to
+    /// the body silhouette and snapping Z to whichever surface is closer.
+    private func normalize(_ local: SIMD3<Float>, in bounds: BoundingBox) -> SIMD3<Float> {
+        let minB = bounds.min
+        let ext  = bounds.extents
+        var n = SIMD3<Float>(
+            ext.x > 0.0001 ? (local.x - minB.x) / ext.x : 0.5,
+            ext.y > 0.0001 ? (local.y - minB.y) / ext.y : 0.5,
+            ext.z > 0.0001 ? (local.z - minB.z) / ext.z : 0.5
+        )
+        n.x = max(0, min(1, n.x))
+        n.y = max(0, min(1, n.y))
+        n.z = n.z > 0.5 ? 1.0 : 0.0            // snap to front or back surface
+        return n
+    }
+
+    /// Inverse of `normalize`: expands [0,1] back into body-local coords with a
+    /// small outward offset so the pin sits on the surface, not buried inside.
+    private func unnormalize(_ n: SIMD3<Float>, in bounds: BoundingBox) -> SIMD3<Float> {
+        let minB = bounds.min
+        let ext  = bounds.extents
+        let offset = pinRadius * 0.5
+        let zSurface = n.z > 0.5 ? bounds.max.z + offset : bounds.min.z - offset
+        return SIMD3<Float>(
+            minB.x + n.x * ext.x,
+            minB.y + n.y * ext.y,
+            zSurface
+        )
+    }
+
+    /// Look up the marker ID for a tapped entity (handles pin sphere or its
+    /// glow child).
+    func markerID(forTappedEntity entity: Entity) -> UUID? {
+        if entity.name.hasPrefix("pin-") {
+            return UUID(uuidString: String(entity.name.dropFirst(4)))
+        }
+        if let parent = entity.parent, parent.name.hasPrefix("pin-") {
+            return UUID(uuidString: String(parent.name.dropFirst(4)))
+        }
+        return nil
     }
 
     /// Updates the free-text note attached to a marker.
@@ -218,18 +350,17 @@ final class SpatialIncidentViewModel {
         injuryMarkers[idx].note = note
     }
 
-    /// Updates the emissive colour of a pin when the user changes its injury type.
+    /// Changes the injury type — the next `syncPinEntities` call refreshes
+    /// the pin's material across every active view.
     func updateMarkerType(_ markerID: UUID, to type: InjuryType) {
         guard let idx = injuryMarkers.firstIndex(where: { $0.id == markerID }) else { return }
         injuryMarkers[idx].injuryType = type
-        applyPinMaterial(to: injuryMarkers[idx].pinEntity, type: type)
     }
 
-    /// Removes a marker and its entity from the scene.
+    /// Removes a marker; the next `syncPinEntities` call purges its pin in
+    /// every active view.
     func removeMarker(_ markerID: UUID) {
-        guard let idx = injuryMarkers.firstIndex(where: { $0.id == markerID }) else { return }
-        injuryMarkers[idx].pinEntity.removeFromParent()
-        injuryMarkers.remove(at: idx)
+        injuryMarkers.removeAll { $0.id == markerID }
         if selectedMarkerID == markerID { selectedMarkerID = nil }
     }
 
@@ -252,11 +383,13 @@ final class SpatialIncidentViewModel {
         // Encode spatial pin positions as normalised BodyMapMarkers for iPad compatibility
         incident.bodyMapMarkers = injuryMarkers.map { m in
             let noteText = m.note.trimmingCharacters(in: .whitespaces)
-            let label = noteText.isEmpty ? m.injuryType.rawValue : "\(m.injuryType.rawValue): \(noteText)"
+            let label = noteText.isEmpty
+                ? m.injuryType.rawValue
+                : "\(m.injuryType.rawValue): \(noteText)"
             return BodyMapMarker(
-                x:       Double((m.worldPosition.x + 0.4) / 0.8).clamped(to: 0...1),
-                y:       Double(1.0 - (m.worldPosition.y + 0.2) / 1.2).clamped(to: 0...1),
-                isFront: true,
+                x:       Double(m.normalizedPosition.x),
+                y:       Double(1.0 - m.normalizedPosition.y),  // 2D map y-flipped
+                isFront: m.normalizedPosition.z > 0.5,
                 label:   label
             )
         }
@@ -277,7 +410,8 @@ final class SpatialIncidentViewModel {
         draftLocation    = ""
         draftWitnesses   = ""
         draftIncidentType = .accident
-        injuryMarkers.forEach { $0.pinEntity.removeFromParent() }
+        // Clearing the markers list triggers each active view's
+        // syncPinEntities to remove the orphaned pin entities.
         injuryMarkers.removeAll()
         selectedMarkerID = nil
     }
@@ -349,17 +483,18 @@ final class SpatialIncidentViewModel {
     }
 
     private func makePinEntity(at position: SIMD3<Float>, type: InjuryType) -> ModelEntity {
-        let mesh = MeshResource.generateSphere(radius: 0.022)
+        let r = pinRadius
+        let mesh = MeshResource.generateSphere(radius: r)
         let entity = ModelEntity(mesh: mesh, materials: [])
         entity.name = "injuryPin"
         entity.position = position
         entity.components.set(InputTargetComponent())
-        entity.components.set(CollisionComponent(shapes: [.generateSphere(radius: 0.022)]))
+        entity.components.set(CollisionComponent(shapes: [.generateSphere(radius: r * 1.4)]))
         entity.components.set(HoverEffectComponent())
         applyPinMaterial(to: entity, type: type)
 
         // Outer glow sphere
-        let glowMesh = MeshResource.generateSphere(radius: 0.038)
+        let glowMesh = MeshResource.generateSphere(radius: pinGlowRadius)
         var glowMat = UnlitMaterial()
         let gc = type.pinColor
         glowMat.color = .init(tint: gc.withAlphaComponent(0.22))
