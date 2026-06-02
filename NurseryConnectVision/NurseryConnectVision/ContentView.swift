@@ -1,26 +1,12 @@
-//
-//  ContentView.swift
-//  NurseryConnectVision
-//
-//  Created by Movindu Liyanage on 2026-06-02.
-//
+// ContentView.swift — NurseryConnectVision
+// Retained as a stub. The app entry point uses VisionRootView.
 
 import SwiftUI
-import RealityKit
-import RealityKitContent
 
 struct ContentView: View {
     var body: some View {
-        VStack {
-            Model3D(named: "Scene", bundle: realityKitContentBundle)
-                .padding(.bottom, 50)
-
-            Text("Hello, world!")
-        }
-        .padding()
+        Text("NurseryConnect Vision")
+            .font(.title2.weight(.semibold))
+            .padding()
     }
-}
-
-#Preview(windowStyle: .automatic) {
-    ContentView()
 }
