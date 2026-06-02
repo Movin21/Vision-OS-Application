@@ -111,18 +111,6 @@ struct VisionIncidentInspectorView: View {
 
         ToolbarItem(placement: .topBarTrailing) {
             Button {
-                openWindow(id: "incident-form")
-            } label: {
-                Label("Log Incident", systemImage: "plus.circle.fill")
-                    .labelStyle(.titleAndIcon)
-                    .font(.subheadline.weight(.semibold))
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(Color.ncAlert)
-        }
-
-        ToolbarItem(placement: .topBarTrailing) {
-            Button {
                 Task {
                     if viewModel.isImmersiveSpaceOpen {
                         await dismissImmersiveSpace()
@@ -216,6 +204,35 @@ struct VisionIncidentInspectorView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(Color.ncAlert)
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+
+            // ── Meal & Attendance quick actions ────────────────
+            HStack(spacing: 10) {
+                Button {
+                    openWindow(id: "meal-log")
+                } label: {
+                    Label("Log Meal", systemImage: "fork.knife")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Color.ncSecondary)
+
+                Button {
+                    openWindow(id: "attendance")
+                } label: {
+                    Label("Attendance", systemImage: "person.fill.checkmark")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Color.ncAccent)
+            }
             .padding(12)
         }
     }

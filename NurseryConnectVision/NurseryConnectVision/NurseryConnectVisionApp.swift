@@ -50,6 +50,24 @@ struct NurseryConnectVisionApp: App {
         .defaultSize(width: 560, height: 640)
         .windowResizability(.contentSize)
 
+        // Meal logging — own window so it can co-exist with the inspector.
+        WindowGroup(id: "meal-log") {
+            MealLogWindow()
+                .modelContainer(container)
+                .environment(sharedViewModel)
+        }
+        .defaultSize(width: 540, height: 640)
+        .windowResizability(.contentSize)
+
+        // Attendance sign-in / sign-out window.
+        WindowGroup(id: "attendance") {
+            AttendanceWindow()
+                .modelContainer(container)
+                .environment(sharedViewModel)
+        }
+        .defaultSize(width: 520, height: 600)
+        .windowResizability(.contentSize)
+
         ImmersiveSpace(id: "BodyMapImmersive") {
             ImmersiveBodyMapView()
                 .modelContainer(container)

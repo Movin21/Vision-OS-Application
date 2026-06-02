@@ -16,6 +16,9 @@ final class MealRecord {
     var fluidType: String
     var allergenChecked: Bool
     var allergenNotes: String
+    /// Child's mood observed during the meal — surfaced in the immersive
+    /// stats panel and the dashboard chart.
+    var mood: MoodLevel
     var child: Child?
 
     var fluidDescription: String { "\(fluidMl)ml \(fluidType)" }
@@ -29,7 +32,8 @@ final class MealRecord {
         fluidMl: Int = 0,
         fluidType: String = "Water",
         allergenChecked: Bool = false,
-        allergenNotes: String = ""
+        allergenNotes: String = "",
+        mood: MoodLevel = .neutral
     ) {
         self.id = UUID()
         self.timestamp = Date()
@@ -42,5 +46,6 @@ final class MealRecord {
         self.fluidType = fluidType
         self.allergenChecked = allergenChecked
         self.allergenNotes = allergenNotes
+        self.mood = mood
     }
 }

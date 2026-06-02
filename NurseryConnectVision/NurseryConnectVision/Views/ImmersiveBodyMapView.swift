@@ -110,6 +110,13 @@ struct ImmersiveBodyMapView: View {
                 rotateUI.components.set(BillboardComponent())
                 content.add(rotateUI)
             }
+
+            // Today's stats panel — placed to the LEFT of the body, head height.
+            if let statsUI = attachments.entity(for: "stats-overlay") {
+                statsUI.position = SIMD3(-0.85, 0.85, -1.4)
+                statsUI.components.set(BillboardComponent())
+                content.add(statsUI)
+            }
         } update: { (content: inout RealityViewContent, attachments: RealityViewAttachments) in
             guard let bodyRoot = localBodyRoot else { return }
 
@@ -143,6 +150,11 @@ struct ImmersiveBodyMapView: View {
             // gesture misses.
             Attachment(id: "rotate-controls") {
                 ImmersiveRotateControls(userYaw: $userYaw, dragStartYaw: $dragStartYaw)
+            }
+
+            // Today's-stats glass card — meals, fluid, mood, attendance.
+            Attachment(id: "stats-overlay") {
+                ImmersiveStatsOverlay(viewModel: vm)
             }
         }
         .simultaneousGesture(
@@ -445,6 +457,164 @@ struct ImmersiveRotateControls: View {
         withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
             dragStartYaw += delta
             userYaw = dragStartYaw
+        }
+    }
+}
+
+// MARK: - Immersive Stats Overlay
+//
+// Floating glass card placed to the left of the body in immersive space.
+// Shows today's meals, fluid total, latest mood, and attendance status.
+
+struct ImmersiveStatsOverlay: View {
+    let viewModel: SpatialIncidentViewModel
+
+    private var child: Child? { viewModel.selectedChild }
+
+    private var todayMeals: [MealRecord] {
+        guard let child else { return [] }
+        return child.mealRecords
+            .filter { Calendar.current.isDateInToday($0.timestamp) }
+            .sorted { $0.timestamp > $1.timestamp }
+    }
+
+    private var todayFluidMl: Int {
+        todayMeals.reduce(0) { $0 + $1.fluidMl }
+    }
+
+    private var latestMood: MoodLevel? {
+        todayMeals.first?.mood
+    }
+
+    private var todayAttendance: AttendanceRecord? {
+        child?.attendanceRecords.first(where: {
+            Calendar.current.isDateInToday($0.date)
+        })
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            header
+
+            if child == nil {
+                Text("Select a child in the inspector window.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                attendanceRow
+                Divider().opacity(0.4)
+                fluidRow
+                Divider().opacity(0.4)
+                moodRow
+                Divider().opacity(0.4)
+                mealsRow
+            }
+        }
+        .padding(18)
+        .frame(width: 280)
+        .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "chart.bar.doc.horizontal")
+                .font(.title3)
+                .foregroundStyle(Color.ncAccent)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Today")
+                    .font(.headline.bold())
+                if let name = child?.firstName {
+                    Text(name)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+        }
+    }
+
+    private var attendanceRow: some View {
+        statRow(
+            icon: todayAttendance?.status.sfSymbol ?? "person.slash",
+            label: "Attendance",
+            value: todayAttendance?.status.rawValue ?? "Not recorded",
+            tint: attendanceColor(todayAttendance?.status)
+        )
+    }
+
+    private var fluidRow: some View {
+        statRow(
+            icon: "drop.fill",
+            label: "Fluid intake",
+            value: "\(todayFluidMl) ml",
+            tint: Color.ncAccent
+        )
+    }
+
+    @ViewBuilder
+    private var moodRow: some View {
+        if let m = latestMood {
+            HStack(spacing: 10) {
+                Text(m.emoji).font(.title2)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Latest mood")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    Text(m.rawValue)
+                        .font(.subheadline.weight(.semibold))
+                }
+                Spacer()
+            }
+        } else {
+            statRow(icon: "face.dashed", label: "Latest mood", value: "—", tint: .secondary)
+        }
+    }
+
+    private var mealsRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: "fork.knife")
+                    .foregroundStyle(Color.ncSecondary)
+                Text("Meals (\(todayMeals.count))")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+            }
+            if todayMeals.isEmpty {
+                Text("No meals logged yet today")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                ForEach(todayMeals.prefix(3), id: \.id) { meal in
+                    HStack(spacing: 6) {
+                        Text(meal.mood.emoji).font(.caption)
+                        Text(meal.mealType.rawValue)
+                            .font(.caption.weight(.semibold))
+                        Text("• \(meal.foodConsumed.rawValue)")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Text(meal.timestamp.formatted(date: .omitted, time: .shortened))
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private func statRow(icon: String, label: String, value: String, tint: Color) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.body)
+                .foregroundStyle(tint)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(label).font(.caption2).foregroundStyle(.secondary)
+                Text(value).font(.subheadline.weight(.semibold))
+            }
+            Spacer()
+        }
+    }
+
+    private func attendanceColor(_ s: AttendanceStatus?) -> Color {
+        switch s {
+        case .present:    return Color.ncSecondary
+        case .signedOut:  return .orange
+        case .absent, nil: return Color.ncAlert
         }
     }
 }

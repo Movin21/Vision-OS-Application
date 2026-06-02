@@ -4,6 +4,7 @@
 // detail column width (~720-800 pt on the default 1120×780 window).
 
 import SwiftUI
+import Charts
 
 struct SpatialDashboardView: View {
     let children: [Child]
@@ -39,6 +40,12 @@ struct SpatialDashboardView: View {
                     .opacity(appeared ? 1 : 0)
                     .offset(y: appeared ? 0 : 16)
                     .animation(.easeOut(duration: 0.5).delay(0.1), value: appeared)
+
+                // ── Weekly trend chart ────────────────────────
+                WeeklyTrendsPanel(children: children)
+                    .opacity(appeared ? 1 : 0)
+                    .offset(y: appeared ? 0 : 16)
+                    .animation(.easeOut(duration: 0.5).delay(0.15), value: appeared)
 
                 // ── 2-column grid ──────────────────────────────
                 HStack(alignment: .top, spacing: 20) {
@@ -391,5 +398,142 @@ struct SpatialDashboardView: View {
         case .behavioural:  return .purple
         case .safeguarding: return Color(red: 0.55, green: 0, blue: 0)
         }
+    }
+}
+
+// MARK: - Weekly Trends Panel
+//
+// Three-up Chart row that summarises the past 7 days across all children:
+//   • Daily fluid intake (bar chart, ml)
+//   • Daily meal count (bar chart)
+//   • Daily attendance count (line chart)
+// Aggregated from each child's MealRecord and AttendanceRecord lists.
+
+struct WeeklyTrendsPanel: View {
+    let children: [Child]
+
+    private struct DayBucket: Identifiable {
+        let id = UUID()
+        let date: Date
+        let fluidMl: Int
+        let meals: Int
+        let attendance: Int
+        let moodScore: Double
+    }
+
+    private var buckets: [DayBucket] {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        return (0..<7).reversed().map { offset -> DayBucket in
+            let day = cal.date(byAdding: .day, value: -offset, to: today)!
+            let meals = children.flatMap { $0.mealRecords }
+                .filter { cal.isDate($0.timestamp, inSameDayAs: day) }
+            let attendance = children.flatMap { $0.attendanceRecords }
+                .filter { cal.isDate($0.date, inSameDayAs: day) && $0.status == .present }
+            let fluid = meals.reduce(0) { $0 + $1.fluidMl }
+            let moodAvg = meals.isEmpty
+                ? 0
+                : meals.map(moodScore).reduce(0, +) / Double(meals.count)
+            return DayBucket(date: day,
+                             fluidMl: fluid,
+                             meals: meals.count,
+                             attendance: attendance.count,
+                             moodScore: moodAvg)
+        }
+    }
+
+    private func moodScore(_ meal: MealRecord) -> Double {
+        switch meal.mood {
+        case .veryHappy:  return 5
+        case .happy:      return 4
+        case .neutral:    return 3
+        case .unsettled:  return 2
+        case .distressed: return 1
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("Weekly Trends", systemImage: "chart.bar.xaxis")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Text("Last 7 days")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 16) {
+                fluidChart
+                mealsChart
+                moodChart
+            }
+            .frame(height: 180)
+        }
+        .padding(20)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var fluidChart: some View {
+        chartCard(title: "Fluid (ml)", tint: Color.ncAccent) {
+            Chart(buckets) { d in
+                BarMark(
+                    x: .value("Day", d.date, unit: .day),
+                    y: .value("ml", d.fluidMl)
+                )
+                .foregroundStyle(Color.ncAccent.gradient)
+                .cornerRadius(4)
+            }
+            .chartXAxis { AxisMarks(values: .stride(by: .day)) {
+                AxisValueLabel(format: .dateTime.weekday(.narrow))
+            } }
+        }
+    }
+
+    private var mealsChart: some View {
+        chartCard(title: "Meals logged", tint: Color.ncSecondary) {
+            Chart(buckets) { d in
+                BarMark(
+                    x: .value("Day", d.date, unit: .day),
+                    y: .value("Meals", d.meals)
+                )
+                .foregroundStyle(Color.ncSecondary.gradient)
+                .cornerRadius(4)
+            }
+            .chartXAxis { AxisMarks(values: .stride(by: .day)) {
+                AxisValueLabel(format: .dateTime.weekday(.narrow))
+            } }
+        }
+    }
+
+    private var moodChart: some View {
+        chartCard(title: "Mood (1-5)", tint: .pink) {
+            Chart(buckets) { d in
+                LineMark(
+                    x: .value("Day", d.date, unit: .day),
+                    y: .value("Mood", d.moodScore)
+                )
+                .foregroundStyle(.pink.gradient)
+                .interpolationMethod(.catmullRom)
+                .symbol(Circle())
+            }
+            .chartYScale(domain: 0...5)
+            .chartXAxis { AxisMarks(values: .stride(by: .day)) {
+                AxisValueLabel(format: .dateTime.weekday(.narrow))
+            } }
+        }
+    }
+
+    @ViewBuilder
+    private func chartCard<C: View>(title: String, tint: Color, @ViewBuilder chart: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Circle().fill(tint).frame(width: 8, height: 8)
+                Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            }
+            chart()
+        }
+        .padding(12)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .frame(maxWidth: .infinity)
     }
 }
