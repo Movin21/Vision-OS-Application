@@ -1,16 +1,16 @@
 // Views/VisionIncidentInspectorView.swift — NurseryConnectVision
 //
-// Immersive "Spatial Safety Radar & 3D Incident Inspector"
-// —————————————————————————————————————————————————————————
-// Architecture:
-//   • NavigationSplitView detail column (windowed visionOS scene)
-//   • SpatialAlertBannerView  — floating glass medical/allergy strip (top overlay)
-//   • BodyMap3DCanvasView     — RealityView procedural body + SpatialTapGesture pin placement
-//   • InjuryAttachmentPanel   — per-pin billboarding SwiftUI panel (RealityView attachment)
-//   • FilterOrnamentView      — native .ornament() glass menu anchored below the window
-//   • IncidentFormSheet       — slide-up glass form to commit the incident to SwiftData
-//   • IncidentTimelineView    — scrollable history of past incidents (timeline filter)
-//   • SpatialAlertsDetailView — expanded alert detail (alerts filter)
+// Two-column Spatial Safety Inspector
+// ──────────────────────────────────────────────────────────────
+//  Left  — 3D body map (RealityView + SpatialTapGesture), fills
+//           all available space so the model has room to breathe.
+//  Right — Fixed 300 pt info sidebar: child overview card,
+//           collapsible safety alerts (allergens / medical /
+//           dietary), incident log, and "Log New Incident" CTA.
+//  Bottom ornament — live stats + full-immersion toggle.
+//
+// Height bug fix: top-level HStack uses maxHeight: .infinity so
+// both columns stretch to fill the window, not shrink to content.
 
 import SwiftUI
 import RealityKit
@@ -24,34 +24,42 @@ struct VisionIncidentInspectorView: View {
     @Bindable var viewModel: SpatialIncidentViewModel
 
     @Environment(\.modelContext) private var context
-    @Environment(\.openImmersiveSpace)  private var openImmersiveSpace
+    @Environment(\.openImmersiveSpace)    private var openImmersiveSpace
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
 
+    @State private var selectedIncident: Incident? = nil
+    @State private var appeared = false
+
     var body: some View {
-        ZStack(alignment: .top) {
-            // Primary canvas — switches with ornament filter
-            Group {
-                switch viewModel.activeFilter {
-                case .bodyMap:
-                    BodyMap3DCanvasView(viewModel: viewModel)
-                case .timeline:
-                    IncidentTimelineView(child: child)
-                case .alerts:
-                    SpatialAlertsDetailView(child: child)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        HStack(alignment: .top, spacing: 0) {
 
-            // High-visibility safety banner — floats at top when body map is active
-            if child.hasActiveAlerts {
-                SpatialAlertBannerView(child: child, isExpanded: $viewModel.isAlertBannerExpanded)
-                    .padding(.top, 12)
-                    .padding(.horizontal, 20)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .animation(.spring(response: 0.4), value: viewModel.isAlertBannerExpanded)
-            }
+            // ── Left: 3D body map ──────────────────────────────
+            bodyMapColumn
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .opacity(appeared ? 1 : 0)
+                .scaleEffect(appeared ? 1 : 0.97)
+                .animation(.easeOut(duration: 0.5).delay(0.1), value: appeared)
 
-            // Save confirmation toast
+            Divider()
+
+            // ── Right: info sidebar ───────────────────────────
+            infoSidebar
+                .frame(width: 300, alignment: .top)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .opacity(appeared ? 1 : 0)
+                .offset(x: appeared ? 0 : 20)
+                .animation(.easeOut(duration: 0.5).delay(0.15), value: appeared)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .navigationTitle(child.fullName)
+        .toolbar { inspectorToolbar }
+        .ornament(attachmentAnchor: .scene(.bottom), contentAlignment: .top) {
+            bottomOrnament
+        }
+        .sheet(isPresented: $viewModel.showIncidentForm) {
+            IncidentFormSheet(child: child, viewModel: viewModel, context: context)
+        }
+        .overlay(alignment: .top) {
             if viewModel.showSaveConfirmation {
                 SaveConfirmationBanner()
                     .padding(.top, 8)
@@ -62,39 +70,54 @@ struct VisionIncidentInspectorView: View {
                     }
             }
         }
-        .navigationTitle(child.fullName)
-        .toolbar { inspectorToolbar }
-        // Floating glass filter menu anchored below the window
-        .ornament(attachmentAnchor: .scene(.bottom), contentAlignment: .top) {
-            FilterOrnamentView(viewModel: viewModel)
-        }
-        // Incident form sheet
-        .sheet(isPresented: $viewModel.showIncidentForm) {
-            IncidentFormSheet(child: child, viewModel: viewModel, context: context)
-        }
         .onAppear {
             viewModel.selectedChild = child
+            withAnimation(.easeOut(duration: 0.6)) { appeared = true }
         }
         .onChange(of: child.id) { _, _ in
+            selectedIncident = nil
+            appeared = false
             viewModel.selectedChild = child
             viewModel.resetDraftForm()
+            withAnimation(.easeOut(duration: 0.6).delay(0.05)) { appeared = true }
         }
     }
 
-    // MARK: Toolbar
+    // MARK: - Toolbar
 
     @ToolbarContentBuilder
     private var inspectorToolbar: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            HStack(spacing: 10) {
+                ChildAvatar(child: child, size: 30)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(child.ageDescription)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    if child.hasActiveAlerts {
+                        HStack(spacing: 3) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 9))
+                                .foregroundStyle(Color.ncAlert)
+                            Text("\(child.allergies.count) allergen\(child.allergies.count == 1 ? "" : "s")")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(Color.ncAlert)
+                        }
+                    }
+                }
+            }
+        }
+
         ToolbarItem(placement: .topBarTrailing) {
             Button {
                 viewModel.showIncidentForm = true
             } label: {
-                Label("New Incident", systemImage: "plus.circle.fill")
+                Label("Log Incident", systemImage: "plus.circle.fill")
                     .labelStyle(.titleAndIcon)
                     .font(.subheadline.weight(.semibold))
             }
             .buttonStyle(.borderedProminent)
-            .tint(Color(hex: "a83836"))
+            .tint(Color.ncAlert)
         }
 
         ToolbarItem(placement: .topBarTrailing) {
@@ -116,137 +139,443 @@ struct VisionIncidentInspectorView: View {
             }
             .buttonStyle(.bordered)
         }
+    }
 
-        ToolbarItem(placement: .topBarLeading) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(child.ageDescription)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
-                HStack(spacing: 4) {
-                    Text("\(child.incidents.count) incident\(child.incidents.count == 1 ? "" : "s")")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    if child.hasActiveAlerts {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.caption2)
-                            .foregroundStyle(Color(hex: "a83836"))
+    // MARK: - Body Map Column (left, flexible)
+
+    private var bodyMapColumn: some View {
+        ZStack(alignment: .bottom) {
+            // 3D canvas fills the entire column
+            BodyMap3DCanvasView(viewModel: viewModel)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            // Active markers strip anchored to bottom
+            if !viewModel.injuryMarkers.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "mappin.circle.fill")
+                        .foregroundStyle(Color.ncAccent)
+                        .font(.caption)
+                    Text("\(viewModel.injuryMarkers.count) marker\(viewModel.injuryMarkers.count == 1 ? "" : "s") placed — tap to classify")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Button("Clear All") {
+                        withAnimation { viewModel.resetDraftForm() }
                     }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.ultraThinMaterial, in: Capsule())
+                .padding(.horizontal, 20)
+                .padding(.bottom, 16)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
     }
-}
 
-// MARK: - Spatial Alert Banner
+    // MARK: - Info Sidebar (right, 300 pt fixed)
 
-struct SpatialAlertBannerView: View {
-    let child: Child
-    @Binding var isExpanded: Bool
-
-    var body: some View {
+    private var infoSidebar: some View {
         VStack(spacing: 0) {
-            // Collapsed or expanded header
-            Button {
-                withAnimation(.spring(response: 0.35)) { isExpanded.toggle() }
-            } label: {
-                HStack(spacing: 10) {
-                    // Pulsing alert icon
-                    ZStack {
-                        Circle()
-                            .fill(Color(hex: "a83836").opacity(0.18))
-                            .frame(width: 34, height: 34)
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(Color(hex: "a83836"))
+
+            // ── Child overview card ────────────────────────────
+            childOverviewCard
+
+            Divider()
+
+            // ── Scrollable content ─────────────────────────────
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+
+                    // Safety alerts section
+                    if child.hasActiveAlerts {
+                        safetySectionGroup
+                    } else {
+                        clearStatusRow
                     }
 
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("SAFETY ALERT — \(child.firstName.uppercased())")
-                            .font(.caption.weight(.heavy))
-                            .foregroundStyle(Color(hex: "a83836"))
-                        if !isExpanded {
-                            Text(summaryLine)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                    }
+                    Divider()
 
-                    Spacer()
-
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-            }
-            .buttonStyle(.plain)
-
-            // Expanded details
-            if isExpanded {
-                Divider().padding(.horizontal, 14)
-
-                VStack(alignment: .leading, spacing: 8) {
-                    if !child.allergies.isEmpty {
-                        alertSection(
-                            icon: "allergens",
-                            title: "ALLERGENS",
-                            items: child.allergies,
-                            accentColor: Color(hex: "a83836")
-                        )
-                    }
-                    if !child.medicalNotes.isEmpty {
-                        alertSection(
-                            icon: "cross.case.fill",
-                            title: "MEDICAL NOTES",
-                            items: [child.medicalNotes],
-                            accentColor: Color(hex: "f0a020")
-                        )
-                    }
-                    if !child.dietaryRequirements.isEmpty {
-                        alertSection(
-                            icon: "fork.knife.circle.fill",
-                            title: "DIETARY",
-                            items: [child.dietaryRequirements],
-                            accentColor: Color(hex: "2a6677")
-                        )
-                    }
+                    // Incident log section
+                    incidentLogGroup
                 }
                 .padding(14)
-                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            Divider()
+
+            // ── New incident CTA ───────────────────────────────
+            Button {
+                viewModel.showIncidentForm = true
+            } label: {
+                Label("Log New Incident", systemImage: "plus.circle.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color.ncAlert)
+            .padding(12)
+        }
+    }
+
+    // ── Child overview card ────────────────────────────────────
+
+    private var childOverviewCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                ChildAvatar(child: child, size: 48)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(child.fullName)
+                        .font(.headline.bold())
+                    Text(child.ageDescription)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(child.ageBand.rawValue)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if child.isBirthdayToday {
+                    Text("🎂")
+                        .font(.title3)
+                }
+            }
+
+            // Quick stat pills
+            HStack(spacing: 6) {
+                let total   = child.incidents.count
+                let pending = child.incidents.filter { $0.reviewStatus == .pendingReview }.count
+                let action  = child.incidents.filter { $0.reviewStatus == .requiresAction }.count
+
+                if child.hasActiveAlerts {
+                    quickPill("Alert", icon: "exclamationmark.triangle.fill", color: Color.ncAlert)
+                }
+                if action > 0 {
+                    quickPill("\(action) Action", icon: "exclamationmark.shield.fill", color: Color.ncAlert)
+                }
+                if pending > 0 {
+                    quickPill("\(pending) Pending", icon: "clock.fill", color: .orange)
+                }
+                quickPill("\(total) Total", icon: "list.clipboard", color: Color.ncAccent)
             }
         }
-        .background(Color(hex: "a83836").opacity(0.08))
-        .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 14))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .strokeBorder(Color(hex: "a83836").opacity(0.35), lineWidth: 1)
-        )
+        .padding(16)
     }
 
-    private var summaryLine: String {
-        var parts: [String] = []
-        if !child.allergies.isEmpty { parts.append("⚠ \(child.allergies.count) allergen\(child.allergies.count > 1 ? "s" : "")") }
-        if !child.medicalNotes.isEmpty { parts.append("Medical notes on file") }
-        return parts.joined(separator: " · ")
+    private func quickPill(_ label: String, icon: String, color: Color) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon).font(.system(size: 9))
+            Text(label).font(.system(size: 10, weight: .semibold))
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(color.opacity(0.12), in: Capsule())
     }
 
-    @ViewBuilder
-    private func alertSection(icon: String, title: String, items: [String], accentColor: Color) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Label(title, systemImage: icon)
+    // ── Safety section ─────────────────────────────────────────
+
+    private var safetySectionGroup: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("SAFETY ALERTS", systemImage: "exclamationmark.triangle.fill")
                 .font(.caption2.weight(.heavy))
-                .foregroundStyle(accentColor)
-            ForEach(items, id: \.self) { item in
-                HStack(spacing: 6) {
-                    Circle().fill(accentColor).frame(width: 5, height: 5)
-                    Text(item)
-                        .font(.caption)
-                        .foregroundStyle(.primary)
+                .foregroundStyle(Color.ncAlert)
+
+            if !child.allergies.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("ALLERGENS")
+                        .font(.caption2.weight(.heavy))
+                        .foregroundStyle(Color.ncAlert.opacity(0.7))
+                    ForEach(child.allergies, id: \.self) { allergen in
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.caption2)
+                                .foregroundStyle(Color.ncAlert)
+                            Text(allergen)
+                                .font(.subheadline.weight(.medium))
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.ncAlert.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+            }
+
+            if !child.medicalNotes.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("MEDICAL NOTES")
+                        .font(.caption2.weight(.heavy))
+                        .foregroundStyle(Color.ncWarning.opacity(0.8))
+                    Text(child.medicalNotes)
+                        .font(.subheadline)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                }
+            }
+
+            if !child.dietaryRequirements.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("DIETARY")
+                        .font(.caption2.weight(.heavy))
+                        .foregroundStyle(Color.ncAccent.opacity(0.8))
+                    Text(child.dietaryRequirements)
+                        .font(.subheadline)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                }
+            }
+
+            if !child.emergencyContactName.isEmpty || !child.emergencyContactPhone.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("EMERGENCY CONTACT")
+                        .font(.caption2.weight(.heavy))
+                        .foregroundStyle(Color.ncAccent.opacity(0.8))
+                    if !child.emergencyContactName.isEmpty {
+                        Label(child.emergencyContactName, systemImage: "person.fill")
+                            .font(.subheadline.weight(.medium))
+                    }
+                    if !child.emergencyContactPhone.isEmpty {
+                        Label(child.emergencyContactPhone, systemImage: "phone.fill")
+                            .font(.subheadline)
+                            .foregroundStyle(Color.ncAccent)
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    private var clearStatusRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.shield.fill")
+                .font(.title3)
+                .foregroundStyle(Color.ncSecondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("No Active Alerts")
+                    .font(.subheadline.weight(.semibold))
+                Text("No allergens or medical notes on file.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.ncSecondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    // ── Incident log ───────────────────────────────────────────
+
+    private var incidentLogGroup: some View {
+        let sorted = child.incidents.sorted { $0.timestamp > $1.timestamp }
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("INCIDENT LOG", systemImage: "list.clipboard.fill")
+                    .font(.caption2.weight(.heavy))
+                    .foregroundStyle(Color.ncAccent)
+                Spacer()
+                let pending = child.incidents.filter { $0.reviewStatus == .pendingReview }.count
+                AlertBadge(count: pending, color: .orange)
+            }
+
+            if sorted.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle")
+                        .font(.title2)
+                        .foregroundStyle(Color.ncSecondary)
+                    Text("No incidents yet.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(sorted.enumerated()), id: \.element.id) { idx, incident in
+                        Button {
+                            withAnimation(.spring(response: 0.3)) {
+                                selectedIncident = selectedIncident?.id == incident.id ? nil : incident
+                            }
+                        } label: {
+                            incidentRow(incident, isLast: idx == sorted.count - 1, isSelected: selectedIncident?.id == incident.id)
+                        }
+                        .buttonStyle(.plain)
+                        .hoverEffect(.highlight)
+                    }
+                }
+
+                // Selected incident detail card
+                if let inc = selectedIncident {
+                    selectedIncidentCard(inc)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
         }
+    }
+
+    private func incidentRow(_ incident: Incident, isLast: Bool, isSelected: Bool) -> some View {
+        let color = statusColor(for: incident.reviewStatus)
+        return HStack(alignment: .top, spacing: 10) {
+            // Spine
+            VStack(spacing: 0) {
+                ZStack {
+                    Circle().fill(color.opacity(0.15)).frame(width: 28, height: 28)
+                    Image(systemName: incident.reviewStatus.sfSymbol)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(color)
+                }
+                if !isLast {
+                    Rectangle().fill(Color.secondary.opacity(0.2))
+                        .frame(width: 1.5).frame(minHeight: 18)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(incident.title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                HStack(spacing: 4) {
+                    Text(incident.incidentType.rawValue)
+                        .font(.system(size: 9, weight: .medium))
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(.thinMaterial, in: Capsule())
+                    if incident.riddorRequired {
+                        Text("RIDDOR")
+                            .font(.system(size: 8, weight: .heavy))
+                            .foregroundStyle(Color.ncWarning)
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(Color.ncWarning.opacity(0.18), in: Capsule())
+                    }
+                }
+                Text(incident.timestamp.shortDate)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.bottom, isLast ? 0 : 14)
+            Spacer()
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(isSelected ? Color.ncAccent.opacity(0.07) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func selectedIncidentCard(_ incident: Incident) -> some View {
+        let color = statusColor(for: incident.reviewStatus)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                StatusBadge(text: incident.reviewStatus.rawValue, color: color)
+                Spacer()
+                Button {
+                    withAnimation(.spring(response: 0.3)) { selectedIncident = nil }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+            }
+
+            if !incident.descriptionText.isEmpty {
+                Text(incident.descriptionText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !incident.location.isEmpty {
+                Label(incident.location, systemImage: "mappin.circle")
+                    .font(.caption).foregroundStyle(Color.ncAccent)
+            }
+            if !incident.witnessNames.isEmpty {
+                Label(incident.witnessNames, systemImage: "person.2")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text(incident.timestamp.fullDateTime)
+                .font(.caption2).foregroundStyle(.secondary)
+
+            if incident.riddorRequired {
+                Label("RIDDOR reporting may be required", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.ncWarning)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.ncWarning.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+        .padding(12)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(color.opacity(0.25), lineWidth: 1))
+    }
+
+    private func statusColor(for status: ReviewStatus) -> Color {
+        switch status {
+        case .pendingReview:  return .orange
+        case .underReview:    return Color.ncAccent
+        case .countersigned:  return Color.ncSecondary
+        case .requiresAction: return Color.ncAlert
+        }
+    }
+
+    // MARK: - Bottom Ornament
+
+    private var bottomOrnament: some View {
+        HStack(spacing: 14) {
+            let markers = viewModel.injuryMarkers.count
+            let total   = child.incidents.count
+
+            if markers > 0 {
+                Label("\(markers) pin\(markers == 1 ? "" : "s") placed", systemImage: "mappin.circle.fill")
+                    .font(.caption.bold())
+                    .foregroundStyle(Color.ncAccent)
+                Divider().frame(height: 18)
+            }
+
+            Label("\(total) incident\(total == 1 ? "" : "s")", systemImage: "list.clipboard")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if child.hasActiveAlerts {
+                Divider().frame(height: 18)
+                Label("\(child.allergies.count) allergen\(child.allergies.count == 1 ? "" : "s")",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption.bold())
+                    .foregroundStyle(Color.ncAlert)
+            }
+
+            Divider().frame(height: 18)
+            Label("Tap body to mark injury", systemImage: "hand.tap.fill")
+                .font(.caption).foregroundStyle(.secondary)
+            Divider().frame(height: 18)
+
+            Button {
+                Task {
+                    if viewModel.isImmersiveSpaceOpen {
+                        await dismissImmersiveSpace()
+                        viewModel.isImmersiveSpaceOpen = false
+                    } else {
+                        await openImmersiveSpace(id: "BodyMapImmersive")
+                        viewModel.isImmersiveSpaceOpen = true
+                    }
+                }
+            } label: {
+                Label(
+                    viewModel.isImmersiveSpaceOpen ? "Exit Immersive" : "Full Immersion",
+                    systemImage: viewModel.isImmersiveSpaceOpen ? "xmark.circle.fill" : "visionpro.fill"
+                )
+                .font(.caption.bold())
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(viewModel.isImmersiveSpaceOpen ? Color.ncAlert : Color.ncAccent)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .glassBackgroundEffect(in: Capsule())
     }
 }
 
@@ -258,87 +587,62 @@ struct BodyMap3DCanvasView: View {
     var body: some View {
         ZStack {
             RealityView { (content: inout RealityViewContent, attachments: RealityViewAttachments) in
-                // Build procedural body once
                 viewModel.buildBody(in: content)
-
             } update: { (content: inout RealityViewContent, attachments: RealityViewAttachments) in
-                // Sync any new pin requested by tap gesture
                 viewModel.syncPendingPin(in: content)
-
-                // Position and register attachment panel entities
                 for marker in viewModel.injuryMarkers {
-                    if let attachEntity = attachments.entity(for: marker.id) {
-                        // Float panel above and slightly in front of the pin
-                        attachEntity.position = marker.worldPosition
-                            + SIMD3<Float>(0, 0.13, 0.08)
-                        if attachEntity.parent == nil {
-                            content.add(attachEntity)
-                        }
+                    if let entity = attachments.entity(for: marker.id) {
+                        entity.position = marker.worldPosition + SIMD3<Float>(0, 0.13, 0.08)
+                        if entity.parent == nil { content.add(entity) }
                     }
                 }
             } attachments: {
-                // One SwiftUI attachment panel per injury marker
                 ForEach(viewModel.injuryMarkers) { marker in
                     Attachment(id: marker.id) {
                         InjuryAttachmentPanel(markerID: marker.id, viewModel: viewModel)
                     }
                 }
             }
-            .gesture(bodyTapGesture)
-
-            // Instruction overlay when no pins placed
-            if viewModel.injuryMarkers.isEmpty && viewModel.isBodyModelReady {
-                tapInstructionOverlay
-            }
-        }
-    }
-
-    // MARK: Tap Gesture
-
-    private var bodyTapGesture: some Gesture {
-        SpatialTapGesture()
-            .targetedToAnyEntity()
-            .onEnded { value in
-                let tappedEntity = value.entity
-
-                if tappedEntity.name == "injuryPin" {
-                    // Tap on existing pin → select it
-                    if let match = viewModel.injuryMarkers.first(
-                        where: { $0.pinEntity === (tappedEntity as? ModelEntity) }
-                    ) {
-                        withAnimation(.spring(response: 0.25)) {
-                            viewModel.selectedMarkerID =
-                                viewModel.selectedMarkerID == match.id ? nil : match.id
+            .gesture(
+                SpatialTapGesture()
+                    .targetedToAnyEntity()
+                    .onEnded { value in
+                        let entity = value.entity
+                        if entity.name == "injuryPin" {
+                            if let match = viewModel.injuryMarkers.first(
+                                where: { $0.pinEntity === (entity as? ModelEntity) }
+                            ) {
+                                withAnimation(.spring(response: 0.25)) {
+                                    viewModel.selectedMarkerID =
+                                        viewModel.selectedMarkerID == match.id ? nil : match.id
+                                }
+                            }
+                            return
                         }
+                        let worldPos = entity.position(relativeTo: nil)
+                        viewModel.pendingTapWorldPosition = worldPos + SIMD3<Float>(0, 0, 0.07)
                     }
-                    return
+            )
+
+            // Tap instruction — shown only when no pins exist yet
+            if viewModel.injuryMarkers.isEmpty && viewModel.isBodyModelReady {
+                VStack(spacing: 6) {
+                    Image(systemName: "hand.tap.fill")
+                        .font(.title2)
+                        .foregroundStyle(Color.ncAccent)
+                    Text("Tap any body part to mark an injury")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-
-                // Tap on a body part → place a new injury pin
-                // World-space centre of the body part + small z-offset toward the viewer
-                let entityWorldPos = tappedEntity.position(relativeTo: nil)
-                viewModel.pendingTapWorldPosition = entityWorldPos + SIMD3<Float>(0, 0, 0.07)
+                .padding(14)
+                .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 12))
+                .offset(y: 130)
             }
-    }
-
-    // MARK: Tap Instruction Overlay
-
-    private var tapInstructionOverlay: some View {
-        VStack(spacing: 6) {
-            Image(systemName: "hand.tap.fill")
-                .font(.title2)
-                .foregroundStyle(Color(hex: "2a6677"))
-            Text("Tap any body part to mark an injury")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
-        .padding(14)
-        .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 12))
-        .offset(y: 140)
     }
 }
 
-// MARK: - Injury Attachment Panel (Spatial Popup)
+// MARK: - Injury Attachment Panel
 
 struct InjuryAttachmentPanel: View {
     let markerID: UUID
@@ -347,41 +651,29 @@ struct InjuryAttachmentPanel: View {
     private var marker: SpatialInjuryMarker? {
         viewModel.injuryMarkers.first { $0.id == markerID }
     }
-
     private var isSelected: Bool { viewModel.selectedMarkerID == markerID }
 
     var body: some View {
         if let marker {
             VStack(spacing: 8) {
-                // Injury type grid
                 HStack(spacing: 0) {
                     ForEach(InjuryType.allCases) { type in
                         Button {
                             viewModel.updateMarkerType(markerID, to: type)
                         } label: {
                             VStack(spacing: 3) {
-                                Image(systemName: type.sfSymbol)
-                                    .font(.caption)
-                                Text(type.rawValue)
-                                    .font(.system(size: 9, weight: .medium))
+                                Image(systemName: type.sfSymbol).font(.caption)
+                                Text(type.rawValue).font(.system(size: 9, weight: .medium))
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 7)
-                            .background(
-                                marker.injuryType == type
-                                    ? typeColor(type).opacity(0.25)
-                                    : Color.clear
-                            )
+                            .background(marker.injuryType == type ? typeColor(type).opacity(0.25) : Color.clear)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 6)
-                                    .strokeBorder(
-                                        marker.injuryType == type ? typeColor(type) : Color.clear,
-                                        lineWidth: 1.2
-                                    )
+                                    .strokeBorder(marker.injuryType == type ? typeColor(type) : Color.clear,
+                                                  lineWidth: 1.2)
                             )
-                            .foregroundStyle(
-                                marker.injuryType == type ? typeColor(type) : Color.secondary
-                            )
+                            .foregroundStyle(marker.injuryType == type ? typeColor(type) : Color.secondary)
                             .clipShape(RoundedRectangle(cornerRadius: 6))
                         }
                         .buttonStyle(.plain)
@@ -390,25 +682,18 @@ struct InjuryAttachmentPanel: View {
 
                 Divider()
 
-                // Footer row: type label + delete
                 HStack {
                     Label(marker.injuryType.rawValue, systemImage: marker.injuryType.sfSymbol)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(typeColor(marker.injuryType))
-
                     Spacer()
-
                     Button(role: .destructive) {
-                        withAnimation(.spring(response: 0.3)) {
-                            viewModel.removeMarker(markerID)
-                        }
+                        withAnimation(.spring(response: 0.3)) { viewModel.removeMarker(markerID) }
                     } label: {
-                        Label("Remove", systemImage: "trash")
-                            .font(.caption2)
-                            .labelStyle(.iconOnly)
+                        Label("Remove", systemImage: "trash").font(.caption2).labelStyle(.iconOnly)
                     }
                     .buttonStyle(.borderless)
-                    .foregroundStyle(Color(hex: "a83836"))
+                    .foregroundStyle(Color.ncAlert)
                 }
             }
             .padding(12)
@@ -437,55 +722,12 @@ struct InjuryAttachmentPanel: View {
     }
 }
 
-// MARK: - Filter Ornament (Anchored Below Window)
-
-struct FilterOrnamentView: View {
-    @Bindable var viewModel: SpatialIncidentViewModel
-
-    var body: some View {
-        HStack(spacing: 4) {
-            ForEach(SafetyViewFilter.allCases) { filter in
-                Button {
-                    withAnimation(.spring(response: 0.3)) {
-                        viewModel.activeFilter = filter
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: filter.sfSymbol)
-                            .font(.subheadline)
-                        Text(filter.rawValue)
-                            .font(.subheadline.weight(.medium))
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(
-                        viewModel.activeFilter == filter
-                            ? Color(hex: "2a6677").opacity(0.20)
-                            : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 10)
-                    )
-                    .foregroundStyle(
-                        viewModel.activeFilter == filter
-                            ? Color(hex: "2a6677")
-                            : Color.primary
-                    )
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 14))
-    }
-}
-
 // MARK: - Incident Form Sheet
 
 struct IncidentFormSheet: View {
     let child: Child
     @Bindable var viewModel: SpatialIncidentViewModel
     let context: ModelContext
-
     @Environment(\.dismiss) private var dismiss
 
     private var isValid: Bool {
@@ -497,12 +739,7 @@ struct IncidentFormSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 20) {
-                    // Marker summary card
-                    if !viewModel.injuryMarkers.isEmpty {
-                        markerSummaryCard
-                    }
-
-                    // Form fields
+                    if !viewModel.injuryMarkers.isEmpty { markerSummaryCard }
                     spatialFormSection("Incident Details") {
                         VStack(spacing: 12) {
                             Picker("Type", selection: $viewModel.draftIncidentType) {
@@ -511,41 +748,16 @@ struct IncidentFormSheet: View {
                                 }
                             }
                             .pickerStyle(.menu)
-
-                            SpatialTextField(
-                                label: "Title",
-                                placeholder: "Brief description of what happened",
-                                text: $viewModel.draftTitle
-                            )
-
-                            SpatialTextField(
-                                label: "Description",
-                                placeholder: "Chronological account of the incident…",
-                                text: $viewModel.draftDescription,
-                                axis: .vertical,
-                                lineLimit: 4...8
-                            )
-
-                            SpatialTextField(
-                                label: "Location",
-                                placeholder: "Where in the setting?",
-                                text: $viewModel.draftLocation
-                            )
-
-                            SpatialTextField(
-                                label: "Witnesses",
-                                placeholder: "Witness names (comma separated)",
-                                text: $viewModel.draftWitnesses
-                            )
+                            SpatialTextField(label: "Title", placeholder: "Brief description", text: $viewModel.draftTitle)
+                            SpatialTextField(label: "Description", placeholder: "Chronological account…",
+                                             text: $viewModel.draftDescription, axis: .vertical, lineLimit: 4...8)
+                            SpatialTextField(label: "Location", placeholder: "Where in the setting?",
+                                             text: $viewModel.draftLocation)
+                            SpatialTextField(label: "Witnesses", placeholder: "Names (comma separated)",
+                                             text: $viewModel.draftWitnesses)
                         }
                     }
-
-                    // RIDDOR notice
-                    if viewModel.draftIncidentType.isRiddorRelevant {
-                        riddorNoticeCard
-                    }
-
-                    // Compliance note
+                    if viewModel.draftIncidentType.isRiddorRelevant { riddorNoticeCard }
                     complianceNote
                 }
                 .padding(20)
@@ -553,9 +765,7 @@ struct IncidentFormSheet: View {
             .navigationTitle("Log Incident — \(child.firstName)")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Submit") {
                         viewModel.saveIncident(for: child, context: context)
@@ -563,12 +773,12 @@ struct IncidentFormSheet: View {
                     }
                     .disabled(!isValid)
                     .fontWeight(.semibold)
-                    .foregroundStyle(isValid ? Color(hex: "a83836") : .secondary)
+                    .foregroundStyle(isValid ? Color.ncAlert : .secondary)
                 }
             }
         }
         .glassBackgroundEffect()
-        .frame(minWidth: 520, minHeight: 600)
+        .frame(minWidth: 520, minHeight: 580)
     }
 
     private var markerSummaryCard: some View {
@@ -576,50 +786,39 @@ struct IncidentFormSheet: View {
             Label("3D Body Map — \(viewModel.injuryMarkers.count) marker\(viewModel.injuryMarkers.count == 1 ? "" : "s") placed",
                   systemImage: "checkmark.circle.fill")
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color(hex: "3b6850"))
-
+                .foregroundStyle(Color.ncSecondary)
             FlowLayout(spacing: 6) {
                 ForEach(viewModel.injuryMarkers) { marker in
                     HStack(spacing: 4) {
-                        Image(systemName: marker.injuryType.sfSymbol)
-                            .font(.caption2)
-                        Text(marker.injuryType.rawValue)
-                            .font(.caption)
+                        Image(systemName: marker.injuryType.sfSymbol).font(.caption2)
+                        Text(marker.injuryType.rawValue).font(.caption)
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 8).padding(.vertical, 4)
                     .background(.thinMaterial, in: Capsule())
                 }
             }
         }
         .padding(14)
-        .background(Color(hex: "3b6850").opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(Color(hex: "3b6850").opacity(0.30), lineWidth: 1)
-        )
+        .background(Color.ncSecondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.ncSecondary.opacity(0.28), lineWidth: 1))
     }
 
     private var riddorNoticeCard: some View {
         HStack(spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(Color(hex: "f0a020"))
-                .font(.title3)
-            Text("This incident type may require **RIDDOR reporting** to the HSE (Health & Safety Executive).")
+                .foregroundStyle(Color.ncWarning).font(.title3)
+            Text("This incident type may require **RIDDOR reporting** to the HSE.")
                 .font(.caption)
         }
         .padding(12)
-        .background(Color(hex: "f0a020").opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .background(Color.ncWarning.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var complianceNote: some View {
         HStack(spacing: 10) {
-            Image(systemName: "clock.badge.exclamationmark")
-                .foregroundStyle(.secondary)
-                .font(.title3)
-            Text("Submitted as **Pending Review** — requires Manager countersignature before finalisation.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            Image(systemName: "clock.badge.exclamationmark").foregroundStyle(.secondary).font(.title3)
+            Text("Submitted as **Pending Review** — requires Manager countersignature.")
+                .font(.caption).foregroundStyle(.secondary)
         }
         .padding(12)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
@@ -628,10 +827,7 @@ struct IncidentFormSheet: View {
     @ViewBuilder
     private func spatialFormSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
+            Text(title).font(.footnote.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
             content()
         }
         .padding(16)
@@ -650,9 +846,7 @@ private struct SpatialTextField: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(label)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
+            Text(label).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
             TextField(placeholder, text: $text, axis: axis == .vertical ? .vertical : .horizontal)
                 .lineLimit(lineLimit)
                 .padding(10)
@@ -661,45 +855,29 @@ private struct SpatialTextField: View {
     }
 }
 
-// MARK: - Flow Layout (for marker tags)
+// MARK: - Flow Layout
 
 private struct FlowLayout: Layout {
     var spacing: CGFloat = 8
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) -> CGSize {
         let width = proposal.width ?? 0
-        var rowX: CGFloat = 0
-        var rowY: CGFloat = 0
-        var rowHeight: CGFloat = 0
-
+        var rowX: CGFloat = 0; var rowY: CGFloat = 0; var rowH: CGFloat = 0
         for view in subviews {
-            let size = view.sizeThatFits(.unspecified)
-            if rowX + size.width > width && rowX > 0 {
-                rowY += rowHeight + spacing
-                rowX = 0
-                rowHeight = 0
-            }
-            rowX += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
+            let s = view.sizeThatFits(.unspecified)
+            if rowX + s.width > width && rowX > 0 { rowY += rowH + spacing; rowX = 0; rowH = 0 }
+            rowX += s.width + spacing; rowH = max(rowH, s.height)
         }
-        return CGSize(width: width, height: rowY + rowHeight)
+        return CGSize(width: width, height: rowY + rowH)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) {
-        var rowX = bounds.minX
-        var rowY = bounds.minY
-        var rowHeight: CGFloat = 0
-
+        var x = bounds.minX; var y = bounds.minY; var rowH: CGFloat = 0
         for view in subviews {
-            let size = view.sizeThatFits(.unspecified)
-            if rowX + size.width > bounds.maxX && rowX > bounds.minX {
-                rowY += rowHeight + spacing
-                rowX = bounds.minX
-                rowHeight = 0
-            }
-            view.place(at: CGPoint(x: rowX, y: rowY), proposal: ProposedViewSize(size))
-            rowX += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
+            let s = view.sizeThatFits(.unspecified)
+            if x + s.width > bounds.maxX && x > bounds.minX { y += rowH + spacing; x = bounds.minX; rowH = 0 }
+            view.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(s))
+            x += s.width + spacing; rowH = max(rowH, s.height)
         }
     }
 }
@@ -709,274 +887,10 @@ private struct FlowLayout: Layout {
 private struct SaveConfirmationBanner: View {
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(Color(hex: "3b6850"))
-            Text("Incident submitted — Pending Review")
-                .font(.subheadline.weight(.semibold))
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.ncSecondary)
+            Text("Incident submitted — Pending Review").font(.subheadline.weight(.semibold))
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 20).padding(.vertical, 12)
         .glassBackgroundEffect(in: Capsule())
-    }
-}
-
-// MARK: - Incident Timeline View (timeline filter)
-
-struct IncidentTimelineView: View {
-    let child: Child
-
-    private var sortedIncidents: [Incident] {
-        child.incidents.sorted { $0.timestamp > $1.timestamp }
-    }
-
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 0) {
-                if sortedIncidents.isEmpty {
-                    emptyState
-                } else {
-                    ForEach(Array(sortedIncidents.enumerated()), id: \.element.id) { idx, incident in
-                        TimelineRow(incident: incident, isLast: idx == sortedIncidents.count - 1)
-                    }
-                }
-            }
-            .padding(20)
-        }
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "clock.arrow.circlepath")
-                .font(.system(size: 44))
-                .foregroundStyle(Color(hex: "2a6677"))
-            Text("No incidents recorded")
-                .font(.title3.weight(.semibold))
-            Text("Incidents logged via the 3D Body Map appear here.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .padding(40)
-        .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 20))
-    }
-}
-
-private struct TimelineRow: View {
-    let incident: Incident
-    let isLast: Bool
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 14) {
-            // Timeline spine
-            VStack(spacing: 0) {
-                ZStack {
-                    Circle().fill(statusColor.opacity(0.18)).frame(width: 36, height: 36)
-                    Image(systemName: incident.reviewStatus.sfSymbol)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(statusColor)
-                }
-                if !isLast {
-                    Rectangle()
-                        .fill(Color.secondary.opacity(0.25))
-                        .frame(width: 2)
-                        .frame(minHeight: 40)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text(incident.title)
-                        .font(.subheadline.weight(.semibold))
-                    Spacer()
-                    Text(incident.timestamp.formatted(date: .abbreviated, time: .shortened))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-
-                HStack(spacing: 6) {
-                    typePill(incident.incidentType)
-                    statusPill(incident.reviewStatus)
-                    if incident.riddorRequired {
-                        Text("RIDDOR")
-                            .font(.system(size: 9, weight: .heavy))
-                            .padding(.horizontal, 6).padding(.vertical, 3)
-                            .background(Color(hex: "f0a020").opacity(0.2), in: Capsule())
-                            .foregroundStyle(Color(hex: "f0a020"))
-                    }
-                }
-
-                if !incident.location.isEmpty {
-                    Label(incident.location, systemImage: "mappin.circle")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                let markerCount = incident.bodyMapMarkers.count
-                if markerCount > 0 {
-                    Label("\(markerCount) body map marker\(markerCount == 1 ? "" : "s")",
-                          systemImage: "figure.stand")
-                        .font(.caption)
-                        .foregroundStyle(Color(hex: "2a6677"))
-                }
-            }
-            .padding(.bottom, isLast ? 0 : 20)
-        }
-    }
-
-    private var statusColor: Color {
-        switch incident.reviewStatus {
-        case .pendingReview:  return Color(hex: "f0a020")
-        case .underReview:    return Color(hex: "2a6677")
-        case .countersigned:  return Color(hex: "3b6850")
-        case .requiresAction: return Color(hex: "a83836")
-        }
-    }
-
-    private func typePill(_ type: IncidentType) -> some View {
-        Text(type.rawValue)
-            .font(.system(size: 10, weight: .medium))
-            .padding(.horizontal, 7).padding(.vertical, 3)
-            .background(.thinMaterial, in: Capsule())
-    }
-
-    private func statusPill(_ status: ReviewStatus) -> some View {
-        Text(status.rawValue)
-            .font(.system(size: 10, weight: .medium))
-            .padding(.horizontal, 7).padding(.vertical, 3)
-            .background(statusColor.opacity(0.12), in: Capsule())
-            .foregroundStyle(statusColor)
-    }
-}
-
-// MARK: - Spatial Alerts Detail View (alerts filter)
-
-struct SpatialAlertsDetailView: View {
-    let child: Child
-
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 16) {
-                if !child.allergies.isEmpty {
-                    allergenCard
-                }
-                if !child.medicalNotes.isEmpty {
-                    medicalCard
-                }
-                if !child.dietaryRequirements.isEmpty {
-                    dietaryCard
-                }
-                if !child.hasActiveAlerts {
-                    clearCard
-                }
-
-                emergencyContactCard
-            }
-            .padding(24)
-        }
-    }
-
-    private var allergenCard: some View {
-        alertCard(
-            title: "Known Allergens",
-            icon: "allergens",
-            accentHex: "a83836"
-        ) {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(child.allergies, id: \.self) { allergen in
-                    HStack(spacing: 10) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(Color(hex: "a83836"))
-                            .font(.subheadline)
-                        Text(allergen)
-                            .font(.subheadline.weight(.medium))
-                    }
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(hex: "a83836").opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
-                }
-            }
-        }
-    }
-
-    private var medicalCard: some View {
-        alertCard(title: "Medical Notes", icon: "cross.case.fill", accentHex: "f0a020") {
-            Text(child.medicalNotes)
-                .font(.subheadline)
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
-        }
-    }
-
-    private var dietaryCard: some View {
-        alertCard(title: "Dietary Requirements", icon: "fork.knife.circle.fill", accentHex: "2a6677") {
-            Text(child.dietaryRequirements)
-                .font(.subheadline)
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
-        }
-    }
-
-    private var clearCard: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "checkmark.shield.fill")
-                .font(.title)
-                .foregroundStyle(Color(hex: "3b6850"))
-            VStack(alignment: .leading, spacing: 2) {
-                Text("No Active Safety Alerts")
-                    .font(.subheadline.weight(.semibold))
-                Text("No allergens, medical notes, or dietary restrictions on file.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(hex: "3b6850").opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-    }
-
-    private var emergencyContactCard: some View {
-        alertCard(title: "Emergency Contact", icon: "phone.fill.arrow.up.right", accentHex: "2a6677") {
-            VStack(alignment: .leading, spacing: 6) {
-                if !child.emergencyContactName.isEmpty {
-                    Label(child.emergencyContactName, systemImage: "person.fill")
-                        .font(.subheadline.weight(.medium))
-                }
-                if !child.emergencyContactPhone.isEmpty {
-                    Label(child.emergencyContactPhone, systemImage: "phone.fill")
-                        .font(.subheadline)
-                        .foregroundStyle(Color(hex: "2a6677"))
-                }
-                if child.emergencyContactName.isEmpty && child.emergencyContactPhone.isEmpty {
-                    Text("No emergency contact on file.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
-        }
-    }
-
-    @ViewBuilder
-    private func alertCard<Content: View>(
-        title: String, icon: String, accentHex: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(title, systemImage: icon)
-                .font(.subheadline.weight(.bold))
-                .foregroundStyle(Color(hex: accentHex))
-            content()
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 16))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(Color(hex: accentHex).opacity(0.25), lineWidth: 1)
-        )
     }
 }

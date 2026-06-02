@@ -349,8 +349,8 @@ final class SpatialIncidentViewModel {
         mat.baseColor       = .init(tint: UIColor(red: r, green: g, blue: b, alpha: 1))
         mat.emissiveColor   = .init(color: UIColor(red: min(r * 1.4, 1), green: min(g * 1.4, 1), blue: min(b * 1.4, 1), alpha: 1))
         mat.emissiveIntensity = 1.4
-        mat.roughness       = .float(0.2)
-        mat.metallic        = .float(0.0)
+        mat.roughness       = 0.2
+        mat.metallic        = 0.0
         entity.model?.materials = [mat]
     }
 }

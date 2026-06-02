@@ -1,6 +1,6 @@
 // Views/VisionRootView.swift — NurseryConnectVision
-// Three-column NavigationSplitView: child roster | incident inspector | (collapsed)
-// Selecting a child immediately focuses the immersive spatial dashboard panel.
+// Three-column NavigationSplitView: child roster | spatial inspector / dashboard
+// Defaults to the aggregate Safety Dashboard when no child is selected.
 
 import SwiftUI
 import SwiftData
@@ -41,7 +41,7 @@ struct VisionRootView: View {
                 VisionIncidentInspectorView(child: child, viewModel: viewModel)
                     .id(child.id)
             } else {
-                SpatialWelcomeView()
+                SpatialDashboardView(children: children)
             }
         }
         .navigationSplitViewStyle(.balanced)
@@ -51,6 +51,68 @@ struct VisionRootView: View {
             else { return }
             viewModel.selectedChild = child
         }
+        .task {
+            if children.isEmpty { seedDemoChildren() }
+        }
+    }
+
+    // MARK: - Demo Seed
+
+    private func seedDemoChildren() {
+        let cal = Calendar.current
+        func dob(yearsAgo: Int, monthsAgo: Int = 0) -> Date {
+            cal.date(byAdding: DateComponents(year: -yearsAgo, month: -monthsAgo), to: Date()) ?? Date()
+        }
+
+        let lily = Child(
+            firstName: "Lily", lastName: "Parker",
+            dateOfBirth: dob(yearsAgo: 3, monthsAgo: 2),
+            assignedKeyworkerName: kKeyworkerName,
+            allergies: ["Peanuts", "Tree nuts"],
+            medicalNotes: "Carries EpiPen — spare held in office safe.",
+            dietaryRequirements: "Strict nut-free diet.",
+            emergencyContactName: "Claire Parker",
+            emergencyContactPhone: "07700 900123"
+        )
+        let oliver = Child(
+            firstName: "Oliver", lastName: "Patel",
+            dateOfBirth: dob(yearsAgo: 4, monthsAgo: 1),
+            assignedKeyworkerName: kKeyworkerName,
+            allergies: ["Dairy"],
+            medicalNotes: "",
+            dietaryRequirements: "Dairy-free alternatives required.",
+            emergencyContactName: "Priya Patel",
+            emergencyContactPhone: "07700 900456"
+        )
+        let amara = Child(
+            firstName: "Amara", lastName: "Johnson",
+            dateOfBirth: dob(yearsAgo: 2, monthsAgo: 9),
+            assignedKeyworkerName: kKeyworkerName,
+            allergies: [],
+            medicalNotes: "Mild asthma — blue Ventolin inhaler kept in child's bag.",
+            dietaryRequirements: "",
+            emergencyContactName: "David Johnson",
+            emergencyContactPhone: "07700 900789"
+        )
+        let noah = Child(
+            firstName: "Noah", lastName: "Williams",
+            dateOfBirth: dob(yearsAgo: 3, monthsAgo: 6),
+            assignedKeyworkerName: kKeyworkerName,
+            emergencyContactName: "Sarah Williams",
+            emergencyContactPhone: "07700 900321"
+        )
+        let freya = Child(
+            firstName: "Freya", lastName: "Chen",
+            dateOfBirth: dob(yearsAgo: 4, monthsAgo: 4),
+            assignedKeyworkerName: kKeyworkerName,
+            allergies: ["Eggs", "Sesame"],
+            medicalNotes: "Eczema — apply Aveeno cream after water play.",
+            emergencyContactName: "Wei Chen",
+            emergencyContactPhone: "07700 900654"
+        )
+
+        for child in [lily, oliver, amara, noah, freya] { context.insert(child) }
+        try? context.save()
     }
 
     // MARK: - Sidebar
@@ -58,10 +120,67 @@ struct VisionRootView: View {
     @ViewBuilder
     private var sidebarContent: some View {
         VStack(spacing: 0) {
+            // Keyworker identity badge
             keyworkerBadge
                 .padding(.horizontal, 16)
                 .padding(.top, 12)
                 .padding(.bottom, 8)
+
+            // Dashboard overview button
+            Button {
+                withAnimation(.spring(response: 0.35)) { selectedChildID = nil }
+            } label: {
+                HStack(spacing: 10) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(selectedChildID == nil ? Color.ncAccent : Color.ncAccent.opacity(0.15))
+                            .frame(width: 34, height: 34)
+                        Image(systemName: "square.grid.2x2.fill")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(selectedChildID == nil ? .white : Color.ncAccent)
+                    }
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Overview Dashboard")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(selectedChildID == nil ? .primary : .primary)
+                        Text("Today's safety summary")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if selectedChildID == nil {
+                        Image(systemName: "checkmark")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(Color.ncAccent)
+                    }
+                }
+                .padding(10)
+                .background(
+                    selectedChildID == nil ? Color.ncAccent.opacity(0.08) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 10)
+                )
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 8)
+            .padding(.bottom, 8)
+
+            Divider().padding(.horizontal, 16)
+
+            // Children section label
+            HStack {
+                Text("CHILDREN")
+                    .font(.caption2.weight(.heavy))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if !filteredChildren.isEmpty {
+                    let alertCount = filteredChildren.filter { $0.hasActiveAlerts }.count
+                    if alertCount > 0 {
+                        AlertBadge(count: alertCount, color: Color.ncAlert)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
 
             List(filteredChildren, selection: $selectedChildID) { child in
                 ChildRosterRow(child: child)
@@ -72,9 +191,22 @@ struct VisionRootView: View {
         }
         .toolbar {
             ToolbarItem(placement: .bottomBar) {
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
+                    let alertCount = children.filter { $0.hasActiveAlerts }.count
+                    if alertCount > 0 {
+                        HStack(spacing: 4) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.caption2)
+                                .foregroundStyle(Color.ncAlert)
+                            Text("\(alertCount) alert\(alertCount == 1 ? "" : "s")")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(Color.ncAlert)
+                        }
+                        Divider().frame(height: 12)
+                    }
                     Image(systemName: "person.2.fill")
                         .foregroundStyle(.secondary)
+                        .font(.caption2)
                     Text("\(filteredChildren.count) children")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -84,11 +216,13 @@ struct VisionRootView: View {
         }
     }
 
+    // MARK: - Keyworker Badge
+
     private var keyworkerBadge: some View {
         HStack(spacing: 10) {
             Image(systemName: "person.badge.key.fill")
                 .font(.title3)
-                .foregroundStyle(Color(hex: "2a6677"))
+                .foregroundStyle(Color.ncAccent)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Keyworker")
                     .font(.caption2)
@@ -97,6 +231,7 @@ struct VisionRootView: View {
                     .font(.subheadline.weight(.semibold))
             }
             Spacer()
+            StatusIndicator(color: .green, isPulsing: true, size: 7)
         }
         .padding(10)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
@@ -107,26 +242,11 @@ struct VisionRootView: View {
 
 private struct ChildRosterRow: View {
     let child: Child
+    @State private var appeared = false
 
     var body: some View {
         HStack(spacing: 12) {
-            // Avatar
-            ZStack {
-                Circle()
-                    .fill(avatarGradient)
-                    .frame(width: 42, height: 42)
-                Text(child.firstName.prefix(1) + child.lastName.prefix(1))
-                    .font(.subheadline.weight(.bold))
-                    .foregroundStyle(.white)
-            }
-            .overlay(alignment: .topTrailing) {
-                if child.hasActiveAlerts {
-                    Circle()
-                        .fill(Color(hex: "a83836"))
-                        .frame(width: 10, height: 10)
-                        .overlay(Circle().stroke(.white, lineWidth: 1.5))
-                }
-            }
+            ChildAvatar(child: child, size: 42)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(child.fullName)
@@ -138,7 +258,7 @@ private struct ChildRosterRow: View {
 
             Spacer()
 
-            VStack(alignment: .trailing, spacing: 2) {
+            VStack(alignment: .trailing, spacing: 3) {
                 let count = child.incidents.count
                 if count > 0 {
                     Text("\(count)")
@@ -146,52 +266,20 @@ private struct ChildRosterRow: View {
                         .foregroundStyle(.white)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Color(hex: "a83836"), in: Capsule())
+                        .background(Color.ncAlert, in: Capsule())
                 }
                 if child.isBirthdayToday {
                     Image(systemName: "birthday.cake.fill")
                         .font(.caption2)
-                        .foregroundStyle(Color(hex: "f0a020"))
+                        .foregroundStyle(Color.ncWarning)
                 }
             }
         }
         .padding(.vertical, 4)
-    }
-
-    private var avatarGradient: LinearGradient {
-        LinearGradient(
-            colors: [Color(hex: "2a6677"), Color(hex: "1b5a6b")],
-            startPoint: .topLeading, endPoint: .bottomTrailing
-        )
-    }
-}
-
-// MARK: - Spatial Welcome (empty state)
-
-private struct SpatialWelcomeView: View {
-    var body: some View {
-        VStack(spacing: 24) {
-            Image(systemName: "figure.child.and.lock")
-                .font(.system(size: 64))
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [Color(hex: "2a6677"), Color(hex: "3b6850")],
-                        startPoint: .top, endPoint: .bottom
-                    )
-                )
-
-            VStack(spacing: 8) {
-                Text("Spatial Safety Radar")
-                    .font(.title2.weight(.bold))
-                Text("Select a child from the roster to open\ntheir 3D Incident Inspector.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-        }
-        .padding(40)
-        .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 24))
-        .padding(40)
+        .opacity(appeared ? 1 : 0)
+        .offset(x: appeared ? 0 : 12)
+        .animation(.easeOut(duration: 0.4), value: appeared)
+        .onAppear { appeared = true }
     }
 }
 

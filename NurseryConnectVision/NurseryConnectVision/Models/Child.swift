@@ -102,6 +102,12 @@ enum IncidentType: String, Codable, CaseIterable {
     }
 }
 
+enum ChildAgeBand: String, CaseIterable {
+    case underTwo    = "Under 2 Years"
+    case twoYears    = "2-3 Years"
+    case threeToFive = "3-5 Years"
+}
+
 enum ReviewStatus: String, Codable, CaseIterable {
     case pendingReview  = "Pending Review"
     case underReview    = "Under Review"
@@ -161,6 +167,15 @@ final class Child {
     }
 
     var hasActiveAlerts: Bool { !allergies.isEmpty || !medicalNotes.isEmpty }
+
+    var initials: String { "\(firstName.prefix(1))\(lastName.prefix(1))" }
+    var hasSevereAllergy: Bool { !allergies.isEmpty }
+    var ageInYears: Int { Calendar.current.dateComponents([.year], from: dateOfBirth, to: Date()).year ?? 0 }
+    var ageBand: ChildAgeBand {
+        if ageInYears < 2 { return .underTwo }
+        if ageInYears < 3 { return .twoYears }
+        return .threeToFive
+    }
 
     init(
         firstName: String,
